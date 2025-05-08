@@ -1,0 +1,15 @@
+[runner]
+# Disabling magicEnabled can prevent Streamlit from trying to
+# deeply introspect or hash functions from complex modules like torch,
+# which can sometimes trigger these errors.
+magicEnabled = false
+
+# As a more drastic measure if the above doesn't work,
+# you could try changing the file watcher type or disabling it,
+# but this affects hot-reloading.
+[server]
+fileWatcherType = "none" # Disable the file watcher entirely
+
+# You might also try to ignore specific folders if torch is in a specific venv path
+# that streamlit is trying to watch too deeply.
+# [watcher]
