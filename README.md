@@ -1,6 +1,26 @@
+## Table of Contents
+- [TinyResearch 🦉](#tinyresearch-)
+  - [Features](#features)
+  - [Project Structure](#project-structure)
+  - [Installation](#installation)
+  - [Usage](#usage)
+    - [Command-Line Interface (`tinyresearch.py`)](#command-line-interface-tinyresearchpy)
+      - [Provider-Specific Examples:](#provider-specific-examples)
+    - [Web UI (`tinyresearch_ui.py`)](#web-ui-tinyresearch_uipy)
+  - [Running Unit Tests](#running-unit-tests)
+    - [Using Python's `unittest` module](#using-pythons-unittest-module)
+    - [Using `pytest` (Recommended)](#using-pytest-recommended)
+  - [To Do](#to-do)
+  - [Credits](#credits)
+
 # TinyResearch 🦉
 
-TinyResearch is an AI agent designed to answer complex questions by breaking them down, searching the web, visiting URLs, and synthesizing information. It is inspired by DeepResearch from jina.ai.
+[TinyResearch}(https://github.com/PieBru/TinyResearch) is a fully local, self-hostable, privacy oriented, lightweight AI agent, designed to answer complex questions by breaking them down, searching the web, visiting URLs, and synthesizing information. It is inspired by DeepResearch from jina.ai, as described by Han Xiao on his [blog post](https://jina.ai/news/a-practical-guide-to-implementing-deepsearch-deepresearch/)
+
+From the jina.ai DeepResearch github repo:
+> Keep searching, reading webpages, reasoning until an answer is found (or the token budget is exceeded). Useful for deeply investigating a query.
+> [!IMPORTANT]  
+> Unlike OpenAI/Gemini/Perplexity's "Deep Research", we focus solely on **finding the right answers via our iterative process**. We don't optimize for long-form articles, that's a **completely different problem** – so if you need quick, concise answers from deep search, you're in the right place. If you're looking for AI-generated long reports like OpenAI/Gemini/Perplexity does, this isn't for you.
 
 ## Features
 
@@ -53,7 +73,6 @@ python tinyresearch.py "What are the emerging trends in sustainable urban agricu
 python tinyresearch.py "Analyze the most significant shifts in global semiconductor supply chain strategies announced by major chip manufacturers and governments in the last 9 months, and what are the projected impacts on consumer electronics availability and pricing?"
 python tinyresearch.py "What are the cutting-edge developments in biodegradable plastics derived from non-food biomass sources reported in the last year, focusing on scalability and end-of-life environmental impact compared to traditional plastics?"
 python tinyresearch.py "How have recent (last 12 months) breakthroughs in quantum error correction affected the projected timelines for fault-tolerant quantum computing, and which research institutions or companies are leading these specific error correction advancements?"
-detection?"
 ```
 
 #### Provider-Specific Examples:
@@ -96,7 +115,7 @@ python tinyresearch.py --llm_provider gemini --llm_model models/gemini-2.0-flash
 # python tinyresearch.py --llm_provider gemini --llm_model gemini-pro "Your question"
 ```
 
-### Web UI
+### Web UI (`tinyresearch_ui.py`)
 A more feature-rich Streamlit UI is also available:
 ```bash
 python tinyresearch_ui.py
@@ -134,4 +153,7 @@ pytest
 
 ## To Do
 
--   Add agentic logic to use specialized search engines (Wikipedia, Arxiv, Pubmed, etc.).
+-   Add agentic logic and tools to use specialized search engines (Wikipedia, Arxiv, Pubmed, etc.).
+
+## Credits
+Huge thanks to Han Xiao from jina.ai for his inspirational [blog post](https://jina.ai/news/a-practical-guide-to-implementing-deepsearch-deepresearch/) and [follow up](https://jina.ai/news/snippet-selection-and-url-ranking-in-deepsearch-deepresearch/)
