@@ -10,11 +10,8 @@ import time # For simulating streaming if needed, and for unique keys
 # This assumes tinyresearch_ui.py is in the same directory as tinyresearch.py
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-try:
-    import torch
-    torch.set_num_threads(1)
-except ImportError:
-    pass # If torch is not directly importable here, sentence_transformers will handle it
+# Torch is not a direct dependency for core logic anymore.
+# If other libraries (like faiss) pull it in, their own threading management applies.
 
 try:
     import tinyresearch
@@ -160,7 +157,7 @@ with st.sidebar: # This line was causing the IndentationError due to the elif ab
             help="Minimum base probability for a token to be selected. (Support varies by model)"
         )
         st.selectbox(
-            "LLM Thinking/Reasoning Style", STYLE_NAMES,
+            "LLM Thinking/Reasoning Preset", STYLE_NAMES,
             # Use the selectbox's own state key for its index/default value
             index=STYLE_NAMES.index(st.session_state.get("selected_style_selectbox", "LLM Default")), 
             key="selected_style_selectbox", # Key for this widget
@@ -339,7 +336,7 @@ if st.session_state.is_running:
     st.info("Processing your request, please wait...")
 
 if st.session_state.thinking_process_log:
-    with st.expander("🧠 Thinking Process", expanded=False):
+    with st.expander("🧠 Thinking/Reasoning Process", expanded=False):
         st.text_area("Log:", value=st.session_state.thinking_process_log, height=400, key=f"log_display_{len(st.session_state.thinking_process_log)}")
 
 if st.session_state.final_answer_output:

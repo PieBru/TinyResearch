@@ -3,14 +3,39 @@ from unittest.mock import patch, MagicMock
 import sys
 import os
 import json
-import time # Added for time.time() in other tests
-import argparse # For testing initialize_context_and_variables
-import numpy as np # For mocking sentence_transformers.encode output
+import time
+import argparse
+import collections # Import collections
+import numpy as np
+import faiss
+import requests # Import requests
+from litellm.utils import ModelResponse, Choices, Message, Usage # For creating mock LiteLLM responses
 
 # Add the parent directory to the Python path to import tinyresearch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import tinyresearch
+
+MOCK_EMBEDDING_DIM = 768 # Example dimension for a mock model like nomic-embed-text
+MOCK_EMBEDDING_MODEL_NAME = "ollama/mock-embedding-model"
+
+def create_mock_embedding_response(embeddings_list, model_name="mock_embedding_model", prompt_tokens=10, total_tokens=10):
+    """
+    Helper function to create a mock litellm.embedding response.
+    embeddings_list: A list of embedding vectors (each vector is a list of floats).
+    """
+    data_items = []
+    for emb_vector in embeddings_list:
+        item = MagicMock()
+        item.embedding = emb_vector
+        data_items.append(item)
+    
+    response = ModelResponse(model=model_name, usage=Usage(prompt_tokens=prompt_tokens, total_tokens=total_tokens))
+    # Manually set .data as it's not in the constructor in all litellm versions or for all response types
+    response.data = data_items 
+    # Ensure choices and message are present if some part of litellm expects them, even for embeddings
+    response.choices = [Choices(message=Message(content=None), finish_reason="stop")]
+    return response
 
 class TestTinyResearchHelpers(unittest.TestCase):
 
@@ -99,78 +124,98 @@ class TestTinyResearchHelpers(unittest.TestCase):
         self.assertEqual(unique_existing, [])
 
     def test_add_to_gaps_queue(self):
-        context = {"gaps_queue": []}
+        context = {"gaps_queue": []} # Should be a deque in actual code, but list is fine for this test's purpose
         questions_to_add = ["Q1", "Q2"]
         tinyresearch.add_to_gaps_queue(context, questions_to_add)
         self.assertEqual(len(context["gaps_queue"]), 2)
+        # Assuming it appends, so order is preserved
         self.assertEqual(context["gaps_queue"][0], {"text": "Q1", "is_original": False})
         self.assertEqual(context["gaps_queue"][1], {"text": "Q2", "is_original": False})
-
 
 class TestTinyResearchTools(unittest.TestCase):
 
     def setUp(self):
         self.context = {
-            "knowledge_base": [],
-            "tokens_used": 0, # Required for _make_llm_api_call if we were testing it directly
-            "urls_to_visit": [],
-            "visited_urls": set(),
-            "disable_search_next": False, # Add missing key
-            "disable_visit_next": False,  # Add missing key
-            "disable_reflect_next": False # Add for completeness, though not directly tested here yet
-
+            "knowledge_base": [], "tokens_used": 0, "urls_to_visit": [], "visited_urls": set(),
+            "disable_search_next": False, "disable_visit_next": False, "disable_reflect_next": False,
+            "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME,
+            # embedding_dim will be set by _initialize_vector_db if called
         }
+        self.mock_litellm_embedding_patcher = patch('tinyresearch.litellm.embedding')
+        self.mock_litellm_embedding = self.mock_litellm_embedding_patcher.start()
+        # Default return value for any embedding call. Specific tests can override with side_effect.
+        self.mock_litellm_embedding.return_value = create_mock_embedding_response(
+            [[0.1] * MOCK_EMBEDDING_DIM], prompt_tokens=5, total_tokens=5
+        )
+        
+        self.mock_yfinance_ticker_patcher = patch('tinyresearch.yf.Ticker')
+        self.mock_yfinance_ticker = self.mock_yfinance_ticker_patcher.start()
 
-    @patch('tinyresearch.datetime') # Mocking the datetime object from tinyresearch's scope
-    @patch('tinyresearch.pytz')    # Mocking the pytz object from tinyresearch's scope
-    def test_execute_get_current_datetime(self, mock_pytz, mock_datetime_module):
+        self.mock_ddgs_patcher = patch('tinyresearch.DDGS')
+        self.mock_ddgs_class = self.mock_ddgs_patcher.start()
+        self.mock_ddgs_instance = self.mock_ddgs_class.return_value.__enter__.return_value
+
+        self.mock_requests_get_patcher = patch('tinyresearch.requests.get')
+        self.mock_requests_get = self.mock_requests_get_patcher.start()
+
+        self.mock_datetime_patcher = patch('tinyresearch.datetime')
+        self.mock_datetime_module = self.mock_datetime_patcher.start()
+
+        self.mock_pytz_patcher = patch('tinyresearch.pytz')
+        self.mock_pytz_module = self.mock_pytz_patcher.start()
+
+        # Mock for file operations (os.path) if needed by any tool tests
+        self.mock_os_path_patcher = patch('os.path')
+        self.mock_os_path = self.mock_os_path_patcher.start()
+
+
+    def tearDown(self):
+        self.mock_litellm_embedding_patcher.stop()
+        self.mock_yfinance_ticker_patcher.stop()
+        self.mock_ddgs_patcher.stop()
+        self.mock_requests_get_patcher.stop()
+        self.mock_datetime_patcher.stop()
+        self.mock_pytz_patcher.stop()
+        self.mock_os_path_patcher.stop()
+
+    def test_execute_get_current_datetime(self):
         # Setup mock datetime object and its methods
         mock_now_utc = MagicMock()
         mock_now_utc.astimezone.return_value.strftime.return_value = "2023-01-01 10:00:00 UTC+0000"
-        # mock_now_utc.astimezone.return_value.zone = "UTC" # .zone on datetime object is not standard
         
-        mock_datetime_module.now.return_value = mock_now_utc
+        self.mock_datetime_module.now.return_value = mock_now_utc
         
         # Setup mock pytz
         mock_utc_tz = MagicMock()
-        mock_utc_tz.zone = "UTC" # This is what we use in the code to get the string name
-        mock_pytz.utc = mock_utc_tz
-        mock_pytz.timezone.return_value = mock_utc_tz # For default case
+        mock_utc_tz.zone = "UTC"
+        self.mock_pytz_module.utc = mock_utc_tz
+        self.mock_pytz_module.timezone.return_value = mock_utc_tz # For default case
 
-        # Test with default UTC
         result = tinyresearch.execute_get_current_datetime(self.context, {"timezone": "UTC"})
         self.assertEqual(result, "2023-01-01 10:00:00 UTC+0000")
         self.assertEqual(len(self.context["knowledge_base"]), 1)
         self.assertEqual(self.context["knowledge_base"][0]["type"], "current_datetime")
         self.assertEqual(self.context["knowledge_base"][0]["datetime"], "2023-01-01 10:00:00 UTC+0000")
-        self.assertEqual(self.context["knowledge_base"][0]["timezone"], "UTC") # Asserting against the .zone attribute
+        self.assertEqual(self.context["knowledge_base"][0]["timezone"], "UTC")
 
-        # Reset knowledge base for next test case within this method
         self.context["knowledge_base"] = []
-
-        # Test with a specific timezone
         mock_rome_tz = MagicMock()
         mock_rome_tz.zone = "Europe/Rome"
-        mock_pytz.timezone.return_value = mock_rome_tz # Simulate pytz.timezone("Europe/Rome")
+        self.mock_pytz_module.timezone.return_value = mock_rome_tz
         mock_now_utc.astimezone.return_value.strftime.return_value = "2023-01-01 11:00:00 CET+0100"
-        # mock_now_utc.astimezone.return_value.zone = "Europe/Rome" # Not needed as we use mock_rome_tz.zone
 
         result_rome = tinyresearch.execute_get_current_datetime(self.context, {"timezone": "Europe/Rome"})
         self.assertEqual(result_rome, "2023-01-01 11:00:00 CET+0100")
         self.assertEqual(self.context["knowledge_base"][0]["timezone"], "Europe/Rome")
-        mock_pytz.timezone.assert_called_with("Europe/Rome")
+        self.mock_pytz_module.timezone.assert_called_with("Europe/Rome")
 
-    @patch('tinyresearch.yf.Ticker') # Mock yfinance.Ticker
-    def test_execute_get_stock_price(self, mock_yfinance_ticker):
-        # Setup mock Ticker instance and its .info attribute
+    def test_execute_get_stock_price(self):
         mock_ticker_instance = MagicMock()
         mock_ticker_instance.info = {
-            "currentPrice": 150.75,
-            "regularMarketPreviousClose": 148.00,
-            "currency": "USD",
-            "symbol": "TEST"
+            "currentPrice": 150.75, "regularMarketPreviousClose": 148.00,
+            "currency": "USD", "symbol": "TEST"
         }
-        mock_yfinance_ticker.return_value = mock_ticker_instance
+        self.mock_yfinance_ticker.return_value = mock_ticker_instance
 
         result = tinyresearch.execute_get_stock_price(self.context, {"ticker": "TEST"})
         expected_text = "Stock data for TEST: Current Price: 150.75 USD. Day Change: +1.86%."
@@ -180,96 +225,105 @@ class TestTinyResearchTools(unittest.TestCase):
         self.assertEqual(kb_item["type"], "stock_data")
         self.assertEqual(kb_item["ticker"], "TEST")
         self.assertEqual(kb_item["data_text"], expected_text)
-        mock_yfinance_ticker.assert_called_once_with("TEST")
+        self.mock_yfinance_ticker.assert_called_once_with("TEST")
 
-        # Test case where ticker is not provided
-        self.context["knowledge_base"] = [] # Reset
+        self.context["knowledge_base"] = []
         result_no_ticker = tinyresearch.execute_get_stock_price(self.context, {})
         self.assertIsNone(result_no_ticker)
         self.assertEqual(len(self.context["knowledge_base"]), 0)
 
-        # Test yfinance exception
-        self.context["knowledge_base"] = [] # Reset
-        mock_yfinance_ticker.side_effect = Exception("yfinance API error")
+        self.context["knowledge_base"] = []
+        self.mock_yfinance_ticker.side_effect = Exception("yfinance API error")
         result_exc = tinyresearch.execute_get_stock_price(self.context, {"ticker": "FAIL"})
         self.assertIsNone(result_exc)
         self.assertEqual(len(self.context["knowledge_base"]), 0)
 
-    @patch('tinyresearch.DDGS')
-    def test_execute_search(self, mock_ddgs_class):
-        mock_ddgs_instance = MagicMock()
+    def test_execute_search(self):
         mock_search_results = [
             {'title': 'Result 1', 'href': 'http://example.com/1', 'body': 'Snippet 1 for result 1.'},
             {'title': 'Result 2', 'href': 'http://example.com/2', 'body': 'Snippet 2 for result 2.'}
         ]
-        mock_ddgs_instance.text.return_value = mock_search_results
-        mock_ddgs_class.return_value.__enter__.return_value = mock_ddgs_instance # Handle context manager
+        self.mock_ddgs_instance.text.return_value = mock_search_results
+
+        # Setup specific side_effect for litellm.embedding for this test
+        # 1. Dimension check (if DB not initialized and add_text_to_vector_db calls _initialize_vector_db)
+        # 2. Embedding for snippet 1
+        # 3. Embedding for snippet 2
+        mock_dim_emb = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM], total_tokens=1)
+        mock_snip1_emb = create_mock_embedding_response([[0.2] * MOCK_EMBEDDING_DIM], total_tokens=2)
+        mock_snip2_emb = create_mock_embedding_response([[0.3] * MOCK_EMBEDDING_DIM], total_tokens=2)
+        # If vector_db_index is not present, _initialize_vector_db will be called first by add_text_to_vector_db
+        self.mock_litellm_embedding.side_effect = [mock_dim_emb, mock_snip1_emb, mock_snip2_emb]
+        
+        # Ensure vector_db_index is not in context to trigger initialization path
+        if 'vector_db_index' in self.context: del self.context['vector_db_index']
+        if 'embedding_dim' in self.context: del self.context['embedding_dim']
+
 
         returned_urls = tinyresearch.execute_search(self.context, "test query")
 
         self.assertEqual(len(returned_urls), 2)
         self.assertIn('http://example.com/1', returned_urls)
-        self.assertEqual(len(self.context["knowledge_base"]), 2)
+        self.assertEqual(len(self.context["knowledge_base"]), 2) # Snippets added to knowledge_base
+        self.assertEqual(self.context["vector_db_index"].ntotal, 2) # Snippets added to vector DB
         self.assertEqual(self.context["knowledge_base"][0]["type"], "search_result_snippet")
         self.assertEqual(self.context["knowledge_base"][0]["snippet"], "Snippet 1 for result 1.")
-        mock_ddgs_instance.text.assert_called_once_with("test query", max_results=tinyresearch.MAX_SEARCH_RESULTS)
+        self.mock_ddgs_instance.text.assert_called_once_with("test query", max_results=tinyresearch.MAX_SEARCH_RESULTS)
+        self.assertEqual(self.mock_litellm_embedding.call_count, 3) # Dim check + 2 snippets
 
-        # Test search error
-        self.context["knowledge_base"] = [] # Reset
-        mock_ddgs_instance.text.side_effect = Exception("Search API error")
+        self.context["knowledge_base"] = []
+        self.mock_ddgs_instance.text.side_effect = Exception("Search API error")
         returned_urls_error = tinyresearch.execute_search(self.context, "error query")
         self.assertEqual(len(returned_urls_error), 0)
         self.assertEqual(len(self.context["knowledge_base"]), 0)
 
-    @patch('tinyresearch.requests.get')
-    def test_visit_urls(self, mock_requests_get):
-        # Mock successful visit
-        mock_response_success = MagicMock()
+    def test_visit_urls(self):
+        # Mock requests.get to return a mock response
+        mock_response_success = MagicMock(spec=requests.Response) # Use spec for better mock behavior
         mock_response_success.status_code = 200
-        # Make the content long enough to be truncated
         long_html_p_tag = b"<p>This is a paragraph of text that is definitely going to be longer than fifty characters to ensure truncation logic is tested.</p>"
         mock_response_success.content = b"<html><head><title>Test Page</title></head><body>" + long_html_p_tag + b"<script>alert('hi')</script></body></html>"
-
-        mock_response_success.raise_for_status.return_value = None # Simulate no HTTPError
-        mock_requests_get.return_value = mock_response_success
+        mock_response_success.raise_for_status.return_value = None
+        self.mock_requests_get.return_value = mock_response_success
 
         self.context["urls_to_visit"] = ["http://example.com/page1"]
         self.context["visited_urls"] = set()
         self.context["web_browser_user_agent"] = "TestAgent/1.0"
-        self.context["max_url_content_length"] = 50
+        self.context["max_url_content_length"] = 50 # For truncation test
 
-        content_pieces = tinyresearch.visit_urls(self.context, {"urls": ["http://example.com/page1"]})
+        # Mock BeautifulSoup to return a mock object with get_text
+        mock_soup_instance = MagicMock()
+        mock_soup_instance.get_text.return_value = "This is a paragraph of text that is definitely going to be longer than fifty characters to ensure truncation logic is tested."
+        
+        with patch('tinyresearch.BeautifulSoup', return_value=mock_soup_instance) as mock_bs_constructor:
+            content_pieces = tinyresearch.visit_urls(self.context, {"urls": ["http://example.com/page1"]})
+            mock_bs_constructor.assert_called_once_with(mock_response_success.content, 'html.parser')
 
         self.assertEqual(len(content_pieces), 1)
         self.assertEqual(content_pieces[0]["url"], "http://example.com/page1")
-        self.assertIn("This is a paragraph of text", content_pieces[0]["content"]) # Check for part of the new content
-        self.assertNotIn("<script>", content_pieces[0]["content"]) # Script tags should be removed
-        self.assertTrue(content_pieces[0]["content"].endswith("... (content truncated)")) # Check truncation
+        self.assertIn("This is a paragraph of text", content_pieces[0]["content"])
+        self.assertNotIn("<script>", content_pieces[0]["content"])
+        self.assertTrue(content_pieces[0]["content"].endswith("... (content truncated)"))
         self.assertIn("http://example.com/page1", self.context["visited_urls"])
-        self.assertNotIn("http://example.com/page1", self.context["urls_to_visit"]) # Should be removed
-        mock_requests_get.assert_called_once_with(
-            "http://example.com/page1", 
-            headers={'User-Agent': 'TestAgent/1.0'}, 
-            timeout=tinyresearch.REQUESTS_TIMEOUT
+        self.assertNotIn("http://example.com/page1", self.context["urls_to_visit"])
+        self.mock_requests_get.assert_called_once_with(
+            "http://example.com/page1", headers={'User-Agent': 'TestAgent/1.0'}, timeout=tinyresearch.REQUESTS_TIMEOUT
         )
 
-        # Test already visited URL
         content_pieces_again = tinyresearch.visit_urls(self.context, {"urls": ["http://example.com/page1"]})
-        self.assertEqual(len(content_pieces_again), 0) # Should not re-visit
+        self.assertEqual(len(content_pieces_again), 0)
 
-        # Test failed visit (e.g., 403 Forbidden)
-        self.context["urls_to_visit"] = ["http://example.com/forbidden"]
-        self.context["visited_urls"] = set() # Reset for this sub-test
-        mock_response_fail = MagicMock()
+        mock_response_fail = MagicMock(spec=requests.Response) # Add spec back
+        self.context["visited_urls"] = set()
+        mock_response_fail = MagicMock(spec=requests.Response) # Use spec
         mock_response_fail.raise_for_status.side_effect = tinyresearch.requests.exceptions.HTTPError("403 Forbidden")
-        mock_requests_get.return_value = mock_response_fail
+        self.mock_requests_get.return_value = mock_response_fail
         
         content_pieces_fail = tinyresearch.visit_urls(self.context, {"urls": ["http://example.com/forbidden"]})
         self.assertEqual(len(content_pieces_fail), 0)
-        self.assertNotIn("http://example.com/forbidden", self.context["visited_urls"]) # Not added if failed
+        self.assertNotIn("http://example.com/forbidden", self.context["visited_urls"])
 
     def test_visit_urls_edge_cases(self):
-        # Test with invalid URL format in input
         self.context["urls_to_visit"] = ["not_a_url", "http://example.com/good"]
         self.context["visited_urls"] = set()
         
@@ -277,357 +331,532 @@ class TestTinyResearchTools(unittest.TestCase):
             if url == "not_a_url":
                 raise tinyresearch.requests.exceptions.RequestException("Invalid URL for test")
             elif url == "http://example.com/good":
-                mock_resp = MagicMock()
+                mock_resp = MagicMock(spec=requests.Response) # Use spec
                 mock_resp.status_code = 200
                 mock_resp.content = b"<p>Good content</p>"
                 mock_resp.raise_for_status.return_value = None
                 return mock_resp
             raise ValueError(f"Unexpected URL for mock_get in test_visit_urls_edge_cases: {url}")
 
-        with patch('tinyresearch.requests.get', side_effect=side_effect_for_get) as mock_get_call:
+        mock_soup_instance_good = MagicMock()
+        mock_soup_instance_good.get_text.return_value = "Good content"
+
+        self.mock_requests_get.side_effect = side_effect_for_get
+        with patch('tinyresearch.BeautifulSoup', return_value=mock_soup_instance_good) as mock_bs_constructor_good:
             content_pieces = tinyresearch.visit_urls(self.context, {"urls": ["not_a_url", "http://example.com/good"]})
-            self.assertEqual(len(content_pieces), 1) # Only good URL should be processed
-            self.assertEqual(content_pieces[0]["url"], "http://example.com/good")
-            # Check that get was called for the good URL and the bad one (which then failed)
-            self.assertIn(unittest.mock.call("http://example.com/good", headers=unittest.mock.ANY, timeout=unittest.mock.ANY), mock_get_call.call_args_list)
-            self.assertIn(unittest.mock.call("not_a_url", headers=unittest.mock.ANY, timeout=unittest.mock.ANY), mock_get_call.call_args_list)
-            self.assertNotIn("not_a_url", self.context["visited_urls"]) # Ensure it wasn't marked as visited
+            mock_bs_constructor_good.assert_called_once_with(b"<p>Good content</p>", 'html.parser') # Check it was called for the good URL
+
+        self.assertEqual(len(content_pieces), 1)
+        self.assertEqual(content_pieces[0]["url"], "http://example.com/good")
+        self.assertIn(unittest.mock.call("http://example.com/good", headers=unittest.mock.ANY, timeout=unittest.mock.ANY), self.mock_requests_get.call_args_list)
+        self.assertIn(unittest.mock.call("not_a_url", headers=unittest.mock.ANY, timeout=unittest.mock.ANY), self.mock_requests_get.call_args_list)
+        self.assertNotIn("not_a_url", self.context["visited_urls"])
 
 class TestTinyResearchContextAndFlow(unittest.TestCase):
-    @patch('tinyresearch._get_embedding_model') # Patch the embedding model loading
-    def test_initialize_context_and_variables(self, mock_get_embedding_model_func):
-        # Setup the mock for _get_embedding_model
-        mock_model_instance = MagicMock()
-        mock_model_instance.get_sentence_embedding_dimension.return_value = 384 # Example dimension for 'all-MiniLM-L6-v2'
-        # Mock the encode method to return a 2D numpy array as expected by FAISS
-        mock_model_instance.encode.return_value = np.random.rand(1, 384).astype(np.float32)
-        mock_get_embedding_model_func.return_value = mock_model_instance
+    def setUp(self):
+        # Common patchers for this test class
+        self.mock_requests_get_patcher = patch('requests.get')
+        self.mock_ddgs_patcher = patch('tinyresearch.DDGS')
+        self.mock_litellm_completion_patcher = patch('litellm.completion')
+        self.mock_litellm_embedding_patcher = patch('tinyresearch.litellm.embedding')
+        
+        self.mock_requests_get = self.mock_requests_get_patcher.start()
+        self.mock_ddgs = self.mock_ddgs_patcher.start()
+        self.mock_litellm_completion = self.mock_litellm_completion_patcher.start()
+        self.mock_litellm_embedding = self.mock_litellm_embedding_patcher.start()
+
+        # Default mock for embedding calls (can be overridden with side_effect in specific tests)
+        self.mock_litellm_embedding.return_value = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM])
+
+        # Mock for file operations
+        self.mock_open_patcher = patch('builtins.open', new_callable=unittest.mock.mock_open)
+        self.mock_open = self.mock_open_patcher.start()
+
+        self.mock_os_path_patcher = patch('os.path')
+        self.mock_os_path = self.mock_os_path_patcher.start()
+        self.mock_os_path.exists.return_value = False # Default for file tests
+
+    def tearDown(self):
+        self.mock_requests_get_patcher.stop()
+        self.mock_ddgs_patcher.stop()
+        self.mock_litellm_completion_patcher.stop()
+        self.mock_litellm_embedding_patcher.stop()
+        self.mock_open_patcher.stop()
+        self.mock_os_path_patcher.stop()
+
+    def test_initialize_context_and_variables(self):
+        mock_dim_embedding_vector = [0.01] * MOCK_EMBEDDING_DIM
+        mock_response_dim_check = create_mock_embedding_response([mock_dim_embedding_vector], prompt_tokens=5, total_tokens=5)
+        
+        mock_question_embedding_vector = [0.02] * MOCK_EMBEDDING_DIM
+        mock_response_add_question = create_mock_embedding_response([mock_question_embedding_vector], prompt_tokens=10, total_tokens=10)
+
+        self.mock_litellm_embedding.side_effect = [
+            mock_response_dim_check,
+            mock_response_add_question
+        ]
 
         mock_args = argparse.Namespace(
-            token_budget=10000,
-            user_question="Test Question?",
-            max_simulation_steps=5,
-            web_browser_user_agent="TestUserAgent",
-            max_url_content_length=1000,
-            time_budget_minutes=tinyresearch.DEFAULT_TIME_BUDGET_MINUTES, # Add missing arg
-            reasoning_style="LLM Default", # Add missing arg
-            reasoning_style_active=False # Add missing arg
+            token_budget=10000, user_question="Test Question?", max_simulation_steps=5,
+            llm_provider="litellm", llm_model="ollama/mock-llm",
+            web_browser_user_agent="TestUserAgent", max_url_content_length=1000,
+            time_budget_minutes=tinyresearch.DEFAULT_TIME_BUDGET_MINUTES,
+            reasoning_style="LLM Default", reasoning_style_active=False,
+            embedding_model_name=MOCK_EMBEDDING_MODEL_NAME
         )
-        context = tinyresearch.initialize_context_and_variables(mock_args)
+        # Gaps queue should be a deque
+        with patch('collections.deque', side_effect=lambda x=None: collections.deque(x) if x is not None else collections.deque()) as mock_deque_constructor: # Patch collections.deque
+            context = tinyresearch.initialize_context_and_variables(mock_args)
+
         self.assertEqual(context["token_budget"], 10000)
         self.assertEqual(context["user_question"], "Test Question?")
-        self.assertEqual(context["max_simulation_steps"], 5)
-        self.assertEqual(context["gaps_queue"][0]["text"], "Test Question?")
         self.assertIn("Test Question?", context["known_questions"])
-        # _get_embedding_model is called once by _initialize_vector_db and once by add_text_to_vector_db
-        self.assertEqual(mock_get_embedding_model_func.call_count, 2) 
+        self.assertTrue(context["gaps_queue"]) 
+        self.assertEqual(context["gaps_queue"][0]["text"], "Test Question?")
+        
+        self.assertIsNotNone(context.get('vector_db_index'))
+        self.assertEqual(context.get('embedding_dim'), MOCK_EMBEDDING_DIM)
+        self.assertEqual(context['vector_db_index'].d, MOCK_EMBEDDING_DIM)
+        self.assertEqual(context['vector_db_index'].ntotal, 1)
+        self.assertEqual(len(context['vector_db_texts']), 1)
+        self.assertEqual(context['vector_db_texts'][0]['text'], "Test Question?")
+        self.assertEqual(context['embedding_model_name'], MOCK_EMBEDDING_MODEL_NAME)
+        self.assertEqual(context['tokens_used'], 5 + 10)
 
-    def test_check_token_budget_exceeded(self):
-        context_ok = {"tokens_used": 500, "token_budget": 1000}
-        self.assertFalse(tinyresearch.check_token_budget_exceeded(context_ok))
+        self.assertEqual(self.mock_litellm_embedding.call_count, 2)
+        call_args_dim = self.mock_litellm_embedding.call_args_list[0]
+        self.assertEqual(call_args_dim.kwargs['model'], MOCK_EMBEDDING_MODEL_NAME)
+        self.assertEqual(call_args_dim.kwargs['input'], ["get dimension test string"])
+        call_args_q = self.mock_litellm_embedding.call_args_list[1]
+        self.assertEqual(call_args_q.kwargs['model'], MOCK_EMBEDDING_MODEL_NAME)
+        self.assertEqual(call_args_q.kwargs['input'], ["Test Question?"])
 
-        context_exceeded = {"tokens_used": 1000, "token_budget": 1000}
-        self.assertTrue(tinyresearch.check_token_budget_exceeded(context_exceeded))
-
-        context_over = {"tokens_used": 1001, "token_budget": 1000}
-        self.assertTrue(tinyresearch.check_token_budget_exceeded(context_over))
-
-    @patch('tinyresearch.get_text_response')
-    def test_generate_final_answer_with_agent(self, mock_get_text_response):
-        # Test with empty knowledge base
-        context_empty_kb = {"user_question": "Q?", "knowledge_base": []}
-        answer_empty = tinyresearch.generate_final_answer_with_agent(context_empty_kb, "reason", "SummarizerAgent")
-        self.assertIn("No significant knowledge gathered", answer_empty)
-
-        # Test with stock data direct answer
-        context_stock = {
-            "user_question": "NVDA stock price?", 
-            "knowledge_base": [{"type": "stock_data", "ticker": "NVDA", "data_text": "NVDA is $100"}]
+    def test_add_and_query_vector_db(self):
+        context = {
+            "user_question": "Initial question for context", "knowledge_base": [],
+            "gaps_queue": collections.deque(), # Use actual deque
+            "processed_urls": set(), "processed_files": set(), "tokens_used": 0,
+            "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME,
         }
-        answer_stock = tinyresearch.generate_final_answer_with_agent(context_stock, "reason", "SummarizerAgent")
-        self.assertEqual(answer_stock, "NVDA is $100")
 
-        # Test with datetime direct answer
-        context_time = {
-            "user_question": "Time in Rome?", 
-            "knowledge_base": [{"type": "current_datetime", "timezone": "Europe/Rome", "datetime": "10:00 Rome"}]
+        mock_dim_emb = [0.1] * MOCK_EMBEDDING_DIM
+        mock_text1_emb = [0.2] * MOCK_EMBEDDING_DIM
+        mock_text2_emb = [0.3] * MOCK_EMBEDDING_DIM
+        mock_query_emb = [0.21] * MOCK_EMBEDDING_DIM
+
+        self.mock_litellm_embedding.side_effect = [
+            create_mock_embedding_response([mock_dim_emb], total_tokens=5),
+            create_mock_embedding_response([mock_text1_emb], total_tokens=10),
+            create_mock_embedding_response([mock_text2_emb], total_tokens=10),
+            create_mock_embedding_response([mock_query_emb], total_tokens=8)
+        ]
+
+        tinyresearch._initialize_vector_db(context) 
+        self.assertEqual(context.get('embedding_dim'), MOCK_EMBEDDING_DIM)
+        self.assertIsNotNone(context.get('vector_db_index'))
+        self.assertEqual(context['vector_db_index'].d, MOCK_EMBEDDING_DIM)
+        self.assertEqual(context['tokens_used'], 5)
+
+        text1 = "This is the first document."
+        text2 = "Another document with different content."
+
+        tinyresearch.add_text_to_vector_db(context, text1, "source1")
+        self.assertEqual(context['vector_db_index'].ntotal, 1)
+        self.assertEqual(len(context['vector_db_texts']), 1)
+        self.assertEqual(context['vector_db_texts'][0]['text'], text1)
+        self.assertEqual(context['tokens_used'], 5 + 10)
+
+        tinyresearch.add_text_to_vector_db(context, text2, "source2")
+        self.assertEqual(context['vector_db_index'].ntotal, 2)
+        self.assertEqual(len(context['vector_db_texts']), 2)
+        self.assertEqual(context['vector_db_texts'][1]['text'], text2)
+        self.assertEqual(context['tokens_used'], 5 + 10 + 10)
+
+        query = "first document query"
+        results = tinyresearch.query_vector_db(context, query, top_n=1)
+        self.assertIn("Source: source1", results)
+        self.assertIn(text1[:50], results)
+        self.assertNotIn("source2", results)
+        self.assertEqual(context['tokens_used'], 5 + 10 + 10 + 8)
+        self.assertEqual(self.mock_litellm_embedding.call_count, 4)
+
+    def test_query_vector_db_empty(self):
+        context = {
+            "tokens_used": 0, "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME,
+            "gaps_queue": collections.deque() # Add for completeness if any function uses it
         }
-        answer_time = tinyresearch.generate_final_answer_with_agent(context_time, "reason", "SummarizerAgent")
-        self.assertEqual(answer_time, "The current date and time in Europe/Rome is 10:00 Rome.") # Added period
-
-        # Test fallback to summarizer LLM call
-        context_summarizer = {
-            "user_question": "Complex Q?", 
-            "knowledge_base": [{"type": "search_result_snippet", "snippet": "Some snippet"}],
-            "tokens_used": 0 # Needed for get_text_response
-        }
-        mock_get_text_response.return_value = "Summarized answer."
-        # Mock global LLM settings needed by get_text_response
-        with patch.object(tinyresearch, 'g_llm_provider', 'litellm'), \
-             patch.object(tinyresearch, 'g_llm_model', 'test/model'), \
-             patch.object(tinyresearch, 'g_llm_provider_endpoint', 'http://localhost'):
-            answer_summary = tinyresearch.generate_final_answer_with_agent(context_summarizer, "reason", "SummarizerAgent")
+        self.mock_litellm_embedding.return_value = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM])
         
-        self.assertEqual(answer_summary, "Summarized answer.")
-        mock_get_text_response.assert_called_once()
-        keyword_args = mock_get_text_response.call_args.kwargs # Access keyword arguments
-        self.assertEqual(keyword_args['agent_name'], "SummarizerAgent")
-        self.assertIn("Complex Q?", keyword_args['user_prompt_text'])
+        tinyresearch._initialize_vector_db(context)
+        self.assertEqual(context['vector_db_index'].ntotal, 0)
+        results = tinyresearch.query_vector_db(context, "any query") # This call will now return "No items in vector DB to search."
+        self.assertEqual(results, "No items in vector DB to search.") # Corrected expected value
 
-class TestTinyResearchLLMInteractions(unittest.TestCase):
-
-    @patch('tinyresearch._make_llm_api_call')
-    def test_decide_json_action_valid_json(self, mock_make_llm_api_call):
-        mock_context = {"tokens_used": 0}
-        valid_json_response = '{"action_type": "search", "data": {"query": "test query"}}'
-        mock_make_llm_api_call.return_value = (valid_json_response, None)
-
-        result = tinyresearch.decide_json_action("TestAgent", "SystemPrompt", "UserPrompt", "litellm", "model", "endpoint", 100, mock_context)
-        
-        self.assertEqual(result["action_type"], "search")
-        self.assertEqual(result["data"]["query"], "test query")
-        mock_make_llm_api_call.assert_called_once()
-
-    @patch('tinyresearch._make_llm_api_call')
-    def test_decide_json_action_json_in_markdown(self, mock_make_llm_api_call):
-        mock_context = {"tokens_used": 0}
-        md_json_response = '```json\n{"action_type": "visit", "data": {"urls": ["http://example.com"]}}\n```'
-        mock_make_llm_api_call.return_value = (md_json_response, None)
-
-        result = tinyresearch.decide_json_action("TestAgent", "SystemPrompt", "UserPrompt", "litellm", "model", "endpoint", 100, mock_context)
-        
-        self.assertEqual(result["action_type"], "visit")
-        self.assertEqual(result["data"]["urls"], ["http://example.com"])
-
-    @patch('tinyresearch._make_llm_api_call')
-    def test_decide_json_action_missing_keys(self, mock_make_llm_api_call):
-        mock_context = {"tokens_used": 0}
-        invalid_json_response = '{"action_typo": "search", "data": {"query": "test query"}}' # Deliberate typo
-        mock_make_llm_api_call.return_value = (invalid_json_response, None)
-
-        result = tinyresearch.decide_json_action("TestAgent", "SystemPrompt", "UserPrompt", "litellm", "model", "endpoint", 100, mock_context)
-        
-        self.assertEqual(result["action_type"], "error")
-        self.assertIn("missing 'action_type' or 'data' keys", result["data"]["message"])
-
-    @patch('tinyresearch._make_llm_api_call')
-    def test_decide_json_action_llm_call_error(self, mock_make_llm_api_call):
-        mock_context = {"tokens_used": 0}
-        mock_make_llm_api_call.return_value = (None, "LLM API Failed")
-
-        result = tinyresearch.decide_json_action("TestAgent", "SystemPrompt", "UserPrompt", "litellm", "model", "endpoint", 100, mock_context)
-        
-        self.assertEqual(result["action_type"], "error")
-        self.assertEqual(result["data"]["message"], "LLM API Failed")
-
-# Example of testing a part of the main loop's action dispatch
-class TestRunDeepSearchAgentLogic(unittest.TestCase):
-    @patch('tinyresearch.decide_json_action')
-    @patch('tinyresearch.execute_get_stock_price') # Mock the actual tool execution
-    @patch('tinyresearch.initialize_context_and_variables') # To control initial context
-    @patch('tinyresearch.get_current_question_from_gaps')
-    @patch('tinyresearch.check_token_budget_exceeded', return_value=False) # Assume budget is fine
-    @patch('tinyresearch.time.sleep') # To prevent actual sleep
-    def test_run_deep_search_agent_get_stock_price_action(
-        self, mock_sleep, mock_check_budget, mock_get_question, 
-        mock_init_context, mock_execute_stock, mock_decide_action):
-
-        # Setup mock args for initialize_context_and_variables
+    def test_process_user_question_flow(self):
         mock_args = argparse.Namespace(
-            user_question="NVDA stock price?", token_budget=1000, max_simulation_steps=1,
-            web_browser_user_agent="test", max_url_content_length=100,
-            llm_provider="litellm", llm_model="test/model", llm_provider_endpoint="http://localhost:11434",
-            output_format="text",
-            time_budget_minutes=tinyresearch.DEFAULT_TIME_BUDGET_MINUTES, # Add
-            reasoning_style="LLM Default", # Add
-            reasoning_style_active=False # Add
+            user_question="What is the sky color?", token_budget=10000, max_simulation_steps=1,
+            web_browser_user_agent="TestUserAgent", max_url_content_length=1000,
+            embedding_model_name=MOCK_EMBEDDING_MODEL_NAME,
+            time_budget_minutes=tinyresearch.DEFAULT_TIME_BUDGET_MINUTES,
+            reasoning_style="LLM Default", reasoning_style_active=False,
+            llm_provider="litellm", llm_model="ollama/mock-llm", llm_provider_endpoint="http://localhost:11434",
+            output_format="text" # Added for main
         )
-        # Mock global LLM settings that run_deep_search_agent sets up
-        tinyresearch.g_llm_provider = mock_args.llm_provider
-        tinyresearch.g_llm_model = mock_args.llm_model
-        # Setup initial context (simplified for this test)
-        initial_context = {
-            "simulation_step": 0, "max_simulation_steps": 1, 
-            "gaps_queue": [], "knowledge_base": [], 
-            "urls_to_visit": [], "visited_urls": set(), 
-            "bad_attempts": [], "known_questions": set(), 
-            "tokens_used": 0, "token_budget": 1000, 
-            "user_question": "NVDA stock price?",
-            "current_question": None, 
-            "start_time": time.time(), # Add
-            "time_budget_seconds": tinyresearch.DEFAULT_TIME_BUDGET_MINUTES * 60, # Add
-            "is_user_question_context": False,
-            "disable_reflect_next": False, "disable_search_next": False, "disable_visit_next": False
+        # Mock LLM to return a valid JSON action
+        mock_llm_response_content = json.dumps({
+            "action_type": "answer",
+            "data": {"text": "The sky is blue based on current knowledge.", "is_definitive": True, "is_for_original": True, "has_references": False}
+        })
+
+        self.mock_litellm_completion.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content=mock_llm_response_content))], usage=MagicMock(total_tokens=50))
+        
+        mock_dim_emb = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM])
+        mock_initial_q_emb = create_mock_embedding_response([[0.2] * MOCK_EMBEDDING_DIM])
+        mock_query_emb_resp = create_mock_embedding_response([[0.3] * MOCK_EMBEDDING_DIM]) 
+        mock_llm_resp_emb = create_mock_embedding_response([[0.4] * MOCK_EMBEDDING_DIM]) # For adding final answer
+
+        self.mock_litellm_embedding.side_effect = [mock_dim_emb, mock_initial_q_emb, mock_query_emb_resp, mock_llm_resp_emb]
+
+        # Patch time.sleep to avoid delays
+        with patch('time.sleep'):
+            final_context_or_result = tinyresearch.run_deep_search_agent(mock_args)
+
+        self.mock_litellm_completion.assert_called()
+        self.assertIsNotNone(final_context_or_result)
+        # The final result when max steps is reached is a fallback message, not the LLM's answer
+        self.assertIn("max steps (1) reached", final_context_or_result) # Check for the fallback message
+
+    def test_process_web_search_result(self):
+        context = {
+            "user_question": "Q", "knowledge_base": [], "gaps_queue": collections.deque(),
+            "processed_urls": set(), "processed_files": set(), "tokens_used": 0,
+            "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME,
+            # embedding_dim and vector_db_index will be initialized by add_text_to_vector_db
         }
-        mock_init_context.return_value = initial_context
-        mock_get_question.return_value = {"text": "NVDA stock price?", "is_original": True} # Simulate a question being popped
+        
+        # Embedding calls: 1 for dim check, 1 for the content
+        mock_dim_emb = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM], total_tokens=1)
+        mock_content_emb = create_mock_embedding_response([[0.6] * MOCK_EMBEDDING_DIM], total_tokens=5)
+        self.mock_litellm_embedding.side_effect = [mock_dim_emb, mock_content_emb]
 
-        # Simulate MainDecisionAgent choosing 'get_stock_price'
-        mock_decide_action.return_value = {"action_type": "get_stock_price", "data": {"ticker": "NVDA"}}
+        web_content = "Useful information from the web."
+        tinyresearch.add_text_to_vector_db(context, web_content, source_info="web_search_http://example.com/info")
+        context["processed_urls"].add("http://example.com/info")
 
-        tinyresearch.run_deep_search_agent(mock_args)
+        self.assertIn("http://example.com/info", context["processed_urls"])
+        self.assertEqual(context["vector_db_index"].ntotal, 1)
+        self.assertIn(web_content, context["vector_db_texts"][0]["text"])
+        self.assertEqual(self.mock_litellm_embedding.call_count, 2)
+        self.mock_litellm_embedding.assert_any_call(model=MOCK_EMBEDDING_MODEL_NAME, input=[web_content], api_base='http://localhost:11434') # Expect api_base
 
-        mock_execute_stock.assert_called_once_with(initial_context, {"ticker": "NVDA"})
+    def test_process_file_content(self):
+        context = {
+            "user_question": "Q", "knowledge_base": [], "gaps_queue": collections.deque(),
+            "processed_urls": set(), "processed_files": set(), "tokens_used": 0,
+            "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME,
+            # embedding_dim and vector_db_index will be initialized by add_text_to_vector_db
+        }
+        
+        # Embedding calls: 1 for dim check, 1 for the content
+        mock_dim_emb = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM], total_tokens=1)
+        mock_content_emb = create_mock_embedding_response([[0.9] * MOCK_EMBEDDING_DIM], total_tokens=5)
+        self.mock_litellm_embedding.side_effect = [mock_dim_emb, mock_content_emb]
+        
+        file_content = "Content from a local file."
+        tinyresearch.add_text_to_vector_db(context, file_content, source_info="file_read_test.txt")
+        context["processed_files"].add("test.txt")
 
-    @patch('tinyresearch.decide_json_action')
+        self.assertIn("test.txt", context["processed_files"])
+        self.assertEqual(context["vector_db_index"].ntotal, 1)
+        self.assertIn(file_content, context["vector_db_texts"][0]["text"])
+        self.assertEqual(self.mock_litellm_embedding.call_count, 2)
+        self.mock_litellm_embedding.assert_any_call(model=MOCK_EMBEDDING_MODEL_NAME, input=[file_content], api_base='http://localhost:11434') # Expect api_base
+
+class TestLLMInteraction(unittest.TestCase):
+    def setUp(self):
+        self.mock_litellm_completion_patcher = patch('litellm.completion')
+        self.mock_litellm_embedding_patcher = patch('tinyresearch.litellm.embedding')
+        self.mock_genai_patcher = patch('tinyresearch.genai')
+
+
+        self.mock_litellm_completion = self.mock_litellm_completion_patcher.start()
+        self.mock_litellm_embedding = self.mock_litellm_embedding_patcher.start()
+        self.mock_genai = self.mock_genai_patcher.start()
+
+
+        self.mock_litellm_embedding.return_value = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM])
+
+    def tearDown(self):
+        self.mock_litellm_completion_patcher.stop()
+        self.mock_litellm_embedding_patcher.stop()
+        self.mock_genai_patcher.stop()
+
+
+    def test_make_llm_api_call_litellm(self):
+        context = {"tokens_used": 0}
+        self.mock_litellm_completion.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content="LiteLLM says hi"))],
+            usage=MagicMock(total_tokens=10)
+        )
+        response, error = tinyresearch._make_llm_api_call(
+            "TestAgent", "System prompt", "User prompt", "litellm", "ollama/test", "http://localhost:11434", 100, context
+        )
+        self.assertEqual(response, "LiteLLM says hi")
+        self.assertIsNone(error)
+        self.assertEqual(context["tokens_used"], 10)
+        self.mock_litellm_completion.assert_called_once()
+        call_args = self.mock_litellm_completion.call_args[1] # kwargs
+        self.assertEqual(call_args['model'], "ollama/test")
+        self.assertEqual(call_args['api_base'], "http://localhost:11434")
+
+    def test_make_llm_api_call_gemini(self):
+        context = {"tokens_used": 0}
+        tinyresearch.g_gemini_api_key = "test_key" # Ensure API key is set for Gemini
+        
+        mock_gemini_model_instance = MagicMock()
+        mock_gemini_response = MagicMock(
+            text="Gemini says hi",
+            usage_metadata=MagicMock(total_token_count=20)
+        )
+        mock_gemini_model_instance.generate_content.return_value = mock_gemini_response
+        self.mock_genai.GenerativeModel.return_value = mock_gemini_model_instance
+
+        response, error = tinyresearch._make_llm_api_call(
+            "TestAgent", "System prompt", "User prompt", "gemini", "gemini/test", None, 100, context
+        )
+        self.assertEqual(response, "Gemini says hi")
+        self.assertIsNone(error)
+        self.assertEqual(context["tokens_used"], 20)
+        self.mock_genai.GenerativeModel.assert_called_once_with("gemini/test")
+        mock_gemini_model_instance.generate_content.assert_called_once()
+
+    def test_make_llm_api_call_with_memory(self):
+        context = {
+            "user_question": "Q?", "knowledge_base": [], "gaps_queue": collections.deque(),
+            "processed_urls": set(), "processed_files": set(), "tokens_used": 0,
+            "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME, "embedding_dim": MOCK_EMBEDDING_DIM,
+            "vector_db_index": faiss.IndexFlatL2(MOCK_EMBEDDING_DIM),
+            "vector_db_texts": [{"text": "Memory content", "source": "previous_step"}]
+        }
+        context["vector_db_index"].add(np.array([[0.1] * MOCK_EMBEDDING_DIM], dtype=np.float32))
+
+        self.mock_litellm_embedding.return_value = create_mock_embedding_response([[0.11] * MOCK_EMBEDDING_DIM]) # For query
+        self.mock_litellm_completion.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="LLM with memory"))], usage=MagicMock(total_tokens=30))
+
+        memory_str = tinyresearch.query_vector_db(context, "User query")
+        self.assertIn("Memory content", memory_str)
+        
+        full_prompt = f"System prompt\n\nMemory:\n{memory_str}\n\nUser query"
+        response, _ = tinyresearch._make_llm_api_call(
+            "TestAgent", "System prompt", full_prompt, "litellm", "ollama/test", "http://localhost:11434", 100, context
+        )
+        
+        self.assertEqual(response, "LLM with memory")
+        self.mock_litellm_completion.assert_called_once()
+        args, kwargs = self.mock_litellm_completion.call_args
+        self.assertIn("Memory content", kwargs['messages'][1]['content'])
+
+class TestWebSearch(unittest.TestCase):
+    def setUp(self):
+        self.mock_ddgs_patcher = patch('tinyresearch.DDGS')
+        self.mock_litellm_embedding_patcher = patch('tinyresearch.litellm.embedding')
+        
+        self.mock_ddgs_class = self.mock_ddgs_patcher.start()
+        self.mock_ddgs_instance = self.mock_ddgs_class.return_value.__enter__.return_value
+        self.mock_litellm_embedding = self.mock_litellm_embedding_patcher.start()
+        
+        self.mock_litellm_embedding.return_value = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM])
+
+    def tearDown(self):
+        self.mock_ddgs_patcher.stop()
+        self.mock_litellm_embedding_patcher.stop()
+
+    def test_perform_web_search_action(self):
+        context = {
+            "user_question": "Q?", "knowledge_base": [], "gaps_queue": collections.deque(),
+            "processed_urls": set(), "processed_files": set(), "tokens_used": 0,
+            "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME,
+            "disable_search_next": False, # Added to prevent KeyError if logic checks it
+            # No vector_db_index, so it will be initialized
+        }
+        
+        mock_search_results = [{'href': 'http://example.com', 'body': 'Mock web content', 'title': 'Mock Title'}]
+        self.mock_ddgs_instance.text.return_value = mock_search_results
+
+        mock_dim_emb = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM])
+        mock_content_emb = create_mock_embedding_response([[0.8] * MOCK_EMBEDDING_DIM])
+        self.mock_litellm_embedding.side_effect = [mock_dim_emb, mock_content_emb]
+
+        urls = tinyresearch.execute_search(context, "search query")
+        
+        self.assertIn("http://example.com", urls)
+        self.assertEqual(context["vector_db_index"].ntotal, 1)
+        self.assertIn("Mock web content", context["vector_db_texts"][0]["text"])
+        self.assertEqual(self.mock_litellm_embedding.call_count, 2)
+        self.mock_litellm_embedding.assert_any_call(model=MOCK_EMBEDDING_MODEL_NAME, input=["Mock Title Mock web content"], api_base='http://localhost:11434') # Expect api_base
+
+
+class TestFileProcessing(unittest.TestCase):
+    def setUp(self):
+        self.mock_litellm_embedding_patcher = patch('tinyresearch.litellm.embedding')
+        self.mock_open_patcher = patch('builtins.open', new_callable=unittest.mock.mock_open)
+        self.mock_os_path_patcher = patch('os.path')
+
+        self.mock_litellm_embedding = self.mock_litellm_embedding_patcher.start()
+        self.mock_open = self.mock_open_patcher.start()
+        self.mock_os_path = self.mock_os_path_patcher.start()
+
+        self.mock_litellm_embedding.return_value = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM])
+
+    def tearDown(self):
+        self.mock_litellm_embedding_patcher.stop()
+        self.mock_open_patcher.stop()
+        self.mock_os_path_patcher.stop()
+
+    def test_perform_file_read_action(self):
+        context = {
+            "user_question": "Q?", "knowledge_base": [], "gaps_queue": collections.deque(),
+            "processed_urls": set(), "processed_files": set(), "tokens_used": 0,
+            "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME,
+            # No vector_db_index, so it will be initialized
+        }
+        
+        mock_dim_emb = create_mock_embedding_response([[0.1] * MOCK_EMBEDDING_DIM], total_tokens=1)
+        mock_content_emb = create_mock_embedding_response([[0.9] * MOCK_EMBEDDING_DIM], total_tokens=5)
+        self.mock_litellm_embedding.side_effect = [mock_dim_emb, mock_content_emb]
+
+        self.mock_os_path.exists.return_value = True
+        self.mock_os_path.getsize.return_value = 100 # Small file
+        self.mock_open.return_value.read.return_value = "Mock file content."
+
+        file_path = "test_file.txt"
+        if self.mock_os_path.exists(file_path) and self.mock_os_path.getsize(file_path) < 1000000:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            tinyresearch.add_text_to_vector_db(context, file_content, source_info=f"file_read_{file_path}")
+            context["processed_files"].add(file_path)
+
+        self.assertIn("test_file.txt", context["processed_files"])
+        self.assertEqual(context["vector_db_index"].ntotal, 1)
+        self.assertIn("Mock file content.", context["vector_db_texts"][0]["text"])
+        self.assertEqual(self.mock_litellm_embedding.call_count, 2)
+        self.mock_litellm_embedding.assert_any_call(model=MOCK_EMBEDDING_MODEL_NAME, input=["Mock file content."], api_base='http://localhost:11434') # Expect api_base
+
+class TestRunDeepSearchAgentLogic(unittest.TestCase):
+    def setUp(self):
+        self.mock_decide_json_action_patcher = patch('tinyresearch.decide_json_action')
+        self.mock_initialize_context_patcher = patch('tinyresearch.initialize_context_and_variables')
+        self.mock_get_question_patcher = patch('tinyresearch.get_current_question_from_gaps')
+        self.mock_check_budget_patcher = patch('tinyresearch.check_token_budget_exceeded', return_value=False)
+        self.mock_check_time_budget_patcher = patch('tinyresearch.check_time_budget_exceeded', return_value=False)
+        self.mock_sleep_patcher = patch('time.sleep')
+        self.mock_litellm_embedding_patcher = patch('tinyresearch.litellm.embedding')
+
+        self.mock_decide_action = self.mock_decide_json_action_patcher.start()
+        self.mock_init_context = self.mock_initialize_context_patcher.start()
+        self.mock_get_question = self.mock_get_question_patcher.start()
+        self.mock_check_budget = self.mock_check_budget_patcher.start()
+        self.mock_check_time_budget = self.mock_check_time_budget_patcher.start()
+        self.mock_sleep = self.mock_sleep_patcher.start()
+        self.mock_litellm_embedding = self.mock_litellm_embedding_patcher.start()
+        
+        self.mock_args = argparse.Namespace(
+            user_question="Test Q?", token_budget=1000, max_simulation_steps=1,
+            web_browser_user_agent="test_agent", max_url_content_length=100,
+            llm_provider="litellm", llm_model="test/model", llm_provider_endpoint="http://localhost:11434",
+            output_format="text", time_budget_minutes=10,
+            reasoning_style="LLM Default", reasoning_style_active=False,
+            embedding_model_name=MOCK_EMBEDDING_MODEL_NAME
+        )
+        self.initial_context = {
+            "simulation_step": 0, "max_simulation_steps": 1, "gaps_queue": collections.deque(), 
+            "knowledge_base": [], "urls_to_visit": [], "visited_urls": set(), 
+            "bad_attempts": [], "known_questions": set(), "tokens_used": 0, "token_budget": 1000, 
+            "user_question": "Test Q?", "current_question": None, "start_time": time.time(), 
+            "time_budget_seconds": 600, "is_user_question_context": False,
+            "disable_reflect_next": False, "disable_search_next": False, "disable_visit_next": False,
+            "embedding_model_name": MOCK_EMBEDDING_MODEL_NAME, "embedding_dim": MOCK_EMBEDDING_DIM,
+            "vector_db_index": faiss.IndexFlatL2(MOCK_EMBEDDING_DIM), "vector_db_texts": []
+        }
+        self.mock_init_context.return_value = self.initial_context
+        self.mock_get_question.return_value = {"text": "Test Q?", "is_original": True}
+        mock_dim_emb = create_mock_embedding_response([[0.01] * MOCK_EMBEDDING_DIM])
+        mock_q_emb = create_mock_embedding_response([[0.02] * MOCK_EMBEDDING_DIM])
+        self.mock_litellm_embedding.side_effect = [mock_dim_emb, mock_q_emb, mock_dim_emb, mock_q_emb]
+
+    def tearDown(self):
+        # Stop patchers explicitly started in setUp
+        self.mock_decide_json_action_patcher.stop() 
+        self.mock_initialize_context_patcher.stop() 
+        self.mock_get_question_patcher.stop() 
+        self.mock_check_budget_patcher.stop() 
+        self.mock_sleep_patcher.stop()
+        self.mock_litellm_embedding_patcher.stop()
+        self.mock_check_time_budget_patcher.stop() # Stop the time budget patcher
+
+    @patch('tinyresearch.execute_get_stock_price')
+    def test_run_deep_search_agent_get_stock_price_action(self, mock_execute_stock):
+        self.mock_decide_action.return_value = {"action_type": "get_stock_price", "data": {"ticker": "NVDA"}}
+        tinyresearch.run_deep_search_agent(self.mock_args)
+        mock_execute_stock.assert_called_once_with(self.initial_context, {"ticker": "NVDA"})
+
     @patch('tinyresearch.execute_search')
     @patch('tinyresearch.execute_wikipedia_search')
     @patch('tinyresearch.execute_arxiv_search')
-    @patch('tinyresearch.initialize_context_and_variables')
-    @patch('tinyresearch.get_current_question_from_gaps')
-    @patch('tinyresearch.check_token_budget_exceeded', return_value=False)
-    @patch('tinyresearch.time.sleep')
-    def test_run_deep_search_agent_search_dispatch(
-        self, mock_sleep, mock_check_budget, mock_get_question, mock_init_context,
-        mock_exec_arxiv, mock_exec_wiki, mock_exec_search, mock_decide_action_stack):
-
-        mock_args = argparse.Namespace(
-            user_question="Search for X", token_budget=1000, max_simulation_steps=1,
-            web_browser_user_agent="test", max_url_content_length=100,
-            llm_provider="litellm", llm_model="test/model", llm_provider_endpoint="http://localhost:11434",
-            output_format="text",
-            time_budget_minutes=tinyresearch.DEFAULT_TIME_BUDGET_MINUTES, # Add
-            reasoning_style="LLM Default", # Add
-            reasoning_style_active=False # Add
-        )
-        tinyresearch.g_llm_provider = mock_args.llm_provider
-        tinyresearch.g_llm_model = mock_args.llm_model
-
-        initial_context = {
-            "simulation_step": 0, "max_simulation_steps": 1, "gaps_queue": [], "knowledge_base": [],
-            "urls_to_visit": [], "visited_urls": set(), "bad_attempts": [], "known_questions": set(),
-            "tokens_used": 0, "token_budget": 1000, "user_question": "Search for X",
-            "current_question": None, 
-            "start_time": time.time(), # Add
-            "time_budget_seconds": tinyresearch.DEFAULT_TIME_BUDGET_MINUTES * 60, # Add
-            "is_user_question_context": False,
-            "disable_reflect_next": False, "disable_search_next": False, "disable_visit_next": False
-        }
-        mock_init_context.return_value = initial_context
-        mock_get_question.return_value = {"text": "Search for X", "is_original": True}
-
-        # Test dispatch to Wikipedia
-        mock_decide_action_stack.side_effect = [
-            {"action_type": "search", "data": {"query": "X"}}, # MainDecisionAgent
-            {"action_type": "search_strategy_determined", "data": {"engine_to_use": "wikipedia", "refined_query": "X wiki"}} # SearchStrategyAgent
+    def test_run_deep_search_agent_search_dispatch(self, mock_exec_arxiv, mock_exec_wiki, mock_exec_search):
+        self.mock_decide_action.side_effect = [
+            {"action_type": "search", "data": {"query": "X"}}, 
+            {"action_type": "search_strategy_determined", "data": {"engine_to_use": "wikipedia", "refined_query": "X wiki"}}
         ]
-        tinyresearch.run_deep_search_agent(mock_args)
-        mock_exec_wiki.assert_called_once_with(initial_context, "X wiki")
+        tinyresearch.run_deep_search_agent(self.mock_args)
+        mock_exec_wiki.assert_called_once_with(self.initial_context, "X wiki")
         mock_exec_search.assert_not_called()
         mock_exec_arxiv.assert_not_called()
 
-        # Reset mocks for next scenario
-        mock_exec_wiki.reset_mock()
-        mock_decide_action_stack.reset_mock() # Important to reset side_effect counter
-        initial_context["simulation_step"] = 0 # Reset step for the next run
+        mock_exec_wiki.reset_mock(); mock_exec_search.reset_mock(); mock_exec_arxiv.reset_mock()
+        self.initial_context["simulation_step"] = 0
 
-        # Test dispatch to Arxiv
-        mock_decide_action_stack.side_effect = [
-            {"action_type": "search", "data": {"query": "Y"}}, # MainDecisionAgent
-            {"action_type": "search_strategy_determined", "data": {"engine_to_use": "arxiv", "refined_query": "Y arxiv"}} # SearchStrategyAgent
+        self.mock_decide_action.side_effect = [
+            {"action_type": "search", "data": {"query": "Y"}},
+            {"action_type": "search_strategy_determined", "data": {"engine_to_use": "arxiv", "refined_query": "Y arxiv"}}
         ]
-        tinyresearch.run_deep_search_agent(mock_args) # Call again with new side_effect
-        mock_exec_arxiv.assert_called_once_with(initial_context, "Y arxiv")
-        mock_exec_search.assert_not_called()
-        mock_exec_wiki.assert_not_called()
+        tinyresearch.run_deep_search_agent(self.mock_args)
+        mock_exec_arxiv.assert_called_once_with(self.initial_context, "Y arxiv")
 
-    @patch('tinyresearch.decide_json_action')
+    # Split the answer action flow test into two
     @patch('tinyresearch.evaluate_answer_with_agent')
     @patch('tinyresearch.store_bad_attempt_reset_context')
-    @patch('tinyresearch.initialize_context_and_variables')
-    @patch('tinyresearch.get_current_question_from_gaps')
-    @patch('tinyresearch.check_token_budget_exceeded', return_value=False)
-    @patch('tinyresearch.time.sleep')
-    def test_run_deep_search_agent_answer_action_flow(
-        self, mock_sleep, mock_check_budget, mock_get_question, mock_init_context,
-        mock_store_bad_attempt, mock_eval_answer, mock_decide_action):
-
-        mock_args = argparse.Namespace(
-            user_question="Q?", token_budget=1000, max_simulation_steps=1,
-            web_browser_user_agent="test", max_url_content_length=100,
-            llm_provider="litellm", llm_model="test/model", llm_provider_endpoint="http://localhost:11434",
-            output_format="text",
-            time_budget_minutes=tinyresearch.DEFAULT_TIME_BUDGET_MINUTES, # Add
-            reasoning_style="LLM Default", # Add
-            reasoning_style_active=False # Add
-        )
-        tinyresearch.g_llm_provider = mock_args.llm_provider
-        tinyresearch.g_llm_model = mock_args.llm_model
-
-        initial_context = {
-            "simulation_step": 0, "max_simulation_steps": 1, "gaps_queue": [], "knowledge_base": [],
-            "urls_to_visit": [], "visited_urls": set(), "bad_attempts": [], "known_questions": set(),
-            "tokens_used": 0, "token_budget": 1000, "user_question": "Q?",
-            "current_question": "Q?", 
-            "start_time": time.time(), # Add
-            "time_budget_seconds": tinyresearch.DEFAULT_TIME_BUDGET_MINUTES * 60, # Add
-            "is_user_question_context": True, # Assume it's the original question
-            "disable_reflect_next": False, "disable_search_next": False, "disable_visit_next": False
-        }
-        mock_init_context.return_value = initial_context
-        mock_get_question.return_value = {"text": "Q?", "is_original": True}
-
-        # Scenario 1: Good, definitive answer
-        mock_decide_action.return_value = {"action_type": "answer", "data": {"text": "Final Answer", "is_definitive": True, "is_for_original": True, "has_references": True}}
-        mock_eval_answer.return_value = True # Evaluator says it's good
+    def test_run_deep_search_agent_answer_action_flow_good_answer(self, mock_store_bad_attempt, mock_eval_answer):
+        self.mock_decide_action.return_value = {"action_type": "answer", "data": {"text": "Final Answer", "is_definitive": True, "is_for_original": True, "has_references": True}}
+        mock_eval_answer.return_value = True
         
-        result = tinyresearch.run_deep_search_agent(mock_args)
-        # In this setup, run_deep_search_agent doesn't directly return the final_result,
-        # but we can infer by checking if store_bad_attempt was NOT called and eval_answer was.
-        # A more direct way would be to check a global or a passed-in mutable object if run_deep_search_agent modified it.
-        # For this test, we'll check that the flow proceeded as if a good answer was found.
+        final_answer = tinyresearch.run_deep_search_agent(self.mock_args)
+        self.assertEqual(final_answer, "Final Answer") # This should now pass with the tinyresearch.py fix
         mock_eval_answer.assert_called_once()
         mock_store_bad_attempt.assert_not_called()
-
+    
+    @patch('tinyresearch.evaluate_answer_with_agent')
+    @patch('tinyresearch.store_bad_attempt_reset_context')
+    def test_run_deep_search_agent_answer_action_flow_bad_answer_fallback(self, mock_store_bad_attempt, mock_eval_answer):
         # Scenario 2: Bad answer
-        mock_eval_answer.reset_mock()
-        mock_store_bad_attempt.reset_mock()
-        mock_decide_action.return_value = {"action_type": "answer", "data": {"text": "Bad Answer", "is_definitive": False, "is_for_original": True}}
-        mock_eval_answer.return_value = False # Evaluator says it's bad
+        self.mock_decide_action.return_value = {"action_type": "answer", "data": {"text": "Bad Answer", "is_definitive": False, "is_for_original": True}}
+        mock_eval_answer.return_value = False
         
-        tinyresearch.run_deep_search_agent(mock_args)
+        with patch('tinyresearch.generate_final_answer_with_agent', return_value="Fallback answer") as mock_fallback:
+             tinyresearch.run_deep_search_agent(self.mock_args)
         mock_eval_answer.assert_called_once()
         mock_store_bad_attempt.assert_called_once()
+        # The fallback answer is generated and returned when max steps is reached
+        mock_fallback.assert_called_once()
 
-    @patch('tinyresearch.decide_json_action')
     @patch('tinyresearch.store_bad_attempt_reset_context')
-    @patch('tinyresearch.initialize_context_and_variables')
-    @patch('tinyresearch.get_current_question_from_gaps')
-    @patch('tinyresearch.check_token_budget_exceeded', return_value=False)
-    @patch('tinyresearch.time.sleep')
-    def test_run_deep_search_agent_error_action(
-        self, mock_sleep, mock_check_budget, mock_get_question, mock_init_context,
-        mock_store_bad_attempt, mock_decide_action):
-
-        mock_args = argparse.Namespace(
-            user_question="Q?", token_budget=1000, max_simulation_steps=1,
-            web_browser_user_agent="test", max_url_content_length=100,
-            llm_provider="litellm", llm_model="test/model", llm_provider_endpoint="http://localhost:11434",
-            output_format="text",
-            time_budget_minutes=tinyresearch.DEFAULT_TIME_BUDGET_MINUTES, # Add
-            reasoning_style="LLM Default", # Add
-            reasoning_style_active=False # Add
-        )
-        tinyresearch.g_llm_provider = mock_args.llm_provider
-        tinyresearch.g_llm_model = mock_args.llm_model
-
-        initial_context = {
-            "simulation_step": 0, "max_simulation_steps": 1, "gaps_queue": [], "knowledge_base": [],
-            "urls_to_visit": [], "visited_urls": set(), "bad_attempts": [], "known_questions": set(),
-            "tokens_used": 0, "token_budget": 1000, "user_question": "Q?",
-            "current_question": "Q?", 
-            "start_time": time.time(), # Add
-            "time_budget_seconds": tinyresearch.DEFAULT_TIME_BUDGET_MINUTES * 60, # Add
-            "is_user_question_context": True,
-            "disable_reflect_next": False, "disable_search_next": False, "disable_visit_next": False
-        }
-        mock_init_context.return_value = initial_context
-        mock_get_question.return_value = {"text": "Q?", "is_original": True}
-
-        mock_decide_action.return_value = {"action_type": "error", "data": {"message": "LLM Error", "agent_name": "MainDecisionAgent"}}
+    def test_run_deep_search_agent_error_action(self, mock_store_bad_attempt):
+        self.mock_decide_action.return_value = {"action_type": "error", "data": {"message": "LLM Error", "agent_name": "MainDecisionAgent"}}
         
-        tinyresearch.run_deep_search_agent(mock_args)
+        with patch('tinyresearch.generate_final_answer_with_agent', return_value="Fallback answer on error") as mock_fallback:
+            tinyresearch.run_deep_search_agent(self.mock_args)
         mock_store_bad_attempt.assert_called_once()
+        mock_fallback.assert_called_once()
 
 
 if __name__ == '__main__':

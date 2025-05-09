@@ -1,28 +1,44 @@
-## Table of Contents
-- [TinyResearch 🦉](#tinyresearch-)
-  - [Features](#features)
-  - [Project Structure](#project-structure)
-  - [Installation](#installation)
-  - [Usage](#usage)
-    - [Command-Line Interface (`tinyresearch.py`)](#command-line-interface-tinyresearchpy)
-      - [Provider-Specific Examples:](#provider-specific-examples)
-    - [Web UI (`tinyresearch_ui.py`)](#web-ui-tinyresearch_uipy)
-  - [Running Unit Tests](#running-unit-tests)
-    - [Using Python's `unittest` module](#using-pythons-unittest-module)
-    - [Using `pytest` (Recommended)](#using-pytest-recommended)
-  - [To Do](#to-do)
-  - [Credits](#credits)
+**TL;DR**
+```bash
+# Install
+git clone https://github.com/PieBru/TinyResearch
+cd TinyResearch
+uv venv
 
-# TinyResearch 🦉
+# Update
+git pull
+source .venv/bin/activate
+uv pip install -r requirements.txt -U
 
-[TinyResearch}(https://github.com/PieBru/TinyResearch) is a fully local, self-hostable, privacy oriented, lightweight AI agent, designed to answer complex questions by breaking them down, searching the web, visiting URLs, and synthesizing information. It is inspired by DeepResearch from jina.ai, as described by Han Xiao on his [blog post](https://jina.ai/news/a-practical-guide-to-implementing-deepsearch-deepresearch/)
+# CLI
+python tinyresearch.py --help
+
+# Web UI
+python tests/download_model.py
+streamlit run tinyresearch_ui.py
+```
+
+[TinyResearch](https://github.com/PieBru/TinyResearch) is a fully local, self-hostable, privacy oriented, lightweight AI agent, designed to answer complex questions by breaking them down, searching the web, visiting URLs, and synthesizing information. It is inspired by DeepResearch from jina.ai, as described by Han Xiao on his [blog post](https://jina.ai/news/a-practical-guide-to-implementing-deepsearch-deepresearch/)
 
 From the jina.ai DeepResearch github repo:
 > Keep searching, reading webpages, reasoning until an answer is found (or the token budget is exceeded). Useful for deeply investigating a query.
 > [!IMPORTANT]  
 > Unlike OpenAI/Gemini/Perplexity's "Deep Research", we focus solely on **finding the right answers via our iterative process**. We don't optimize for long-form articles, that's a **completely different problem** – so if you need quick, concise answers from deep search, you're in the right place. If you're looking for AI-generated long reports like OpenAI/Gemini/Perplexity does, this isn't for you.
 
-## Features
+**Table of Contents**
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Command-Line Interface (`tinyresearch.py`)](#command-line-interface-tinyresearchpy)
+    - [Provider-Specific Examples:](#provider-specific-examples)
+  - [Web UI (`tinyresearch_ui.py`)](#web-ui-tinyresearch_uipy)
+- [Running Unit Tests](#running-unit-tests)
+  - [Using Python's `unittest` module](#using-pythons-unittest-module)
+  - [Using `pytest` (Recommended)](#using-pytest-recommended)
+- [Credits](#credits)
+
+# Features
 
 -   Breaks down complex questions into manageable sub-questions.
 -   Performs web searches using DuckDuckGo (with planned support for specialized engines like Wikipedia, Arxiv, Pubmed).
@@ -31,12 +47,12 @@ From the jina.ai DeepResearch github repo:
 -   Manages a token budget to control LLM usage.
 -   Includes a command-line interface (`tinyresearch.py`) and a Streamlit-based web UI (`tinyresearch_ui.py`).
 
-## Project Structure
+# Project Structure
 
 -   `requirements.txt`: Licalhost:8501s intentionally untracked files that Git should ignore.
 -   `LICENSE`: Project's open-source license.
 
-## Installation
+# Installation
 
 1.  Clone the repository (once it's on GitHub):
     ```bash
@@ -59,9 +75,9 @@ From the jina.ai DeepResearch github repo:
     ```
 3.  If using the `gemini` LLM provider, ensure the `GEMINI_API_KEY` environment variable is set.
 
-## Usage
+# Usage
 
-### Command-Line Interface (`tinyresearch.py`)
+## Command-Line Interface (`tinyresearch.py`)
 
 ```bash
 python tinyresearch.py --help
@@ -75,13 +91,14 @@ python tinyresearch.py "What are the cutting-edge developments in biodegradable 
 python tinyresearch.py "How have recent (last 12 months) breakthroughs in quantum error correction affected the projected timelines for fault-tolerant quantum computing, and which research institutions or companies are leading these specific error correction advancements?"
 ```
 
-#### Provider-Specific Examples:
+### Provider-Specific Examples:
 
 **1. Using Ollama:**
 Make sure your Ollama server is running (usually at `http://localhost:11434`).
 ```bash
-# Example using qwen2.5 model from Ollama
+# Example using qwen2.5 and qwen3 model from Ollama
 python tinyresearch.py --llm_provider litellm --llm_model ollama/qwen2.5 "Your question"
+python tinyresearch.py --llm_provider litellm --llm_model ollama/qwen3 "Your question"
 
 # If your Ollama endpoint is different from the default:
 python tinyresearch.py --llm_provider litellm --llm_provider_endpoint http://your-ollama-host:11434 --llm_model ollama/llama3 "Your question"
@@ -115,18 +132,18 @@ python tinyresearch.py --llm_provider gemini --llm_model models/gemini-2.0-flash
 # python tinyresearch.py --llm_provider gemini --llm_model gemini-pro "Your question"
 ```
 
-### Web UI (`tinyresearch_ui.py`)
+## Web UI (`tinyresearch_ui.py`)
 A more feature-rich Streamlit UI is also available:
 ```bash
 python tinyresearch_ui.py
 ```
 Then open your web browser to the URL provided by Streamlit (usually `http://localhost:8501`).
 
-## Running Unit Tests
+# Running Unit Tests
 
 The project includes a suite of unit tests to ensure its components function correctly. The tests are located in the `tests/` directory.
 
-### Using Python's `unittest` module
+## Using Python's `unittest` module
 
 You can run the tests directly using Python's built-in `unittest` module. Navigate to the project's root directory (`/run/media/piero/NVMe-4TB/Piero/Git/TinyResearch/`) in your terminal and execute:
 
@@ -139,7 +156,7 @@ Alternatively, if you are inside the `tests/` directory:
 python -m unittest test_tinyresearch.py
 ```
 
-### Using `pytest` (Recommended)
+## Using `pytest` (Recommended)
 
 `pytest` is a popular testing framework that offers more features and often more readable output. If you don't have it installed, you can install it with pip:
 ```bash
@@ -151,9 +168,5 @@ pytest
 ```
 `pytest` will automatically discover and run the tests in the `tests/` directory.
 
-## To Do
-
--   Add agentic logic and tools to use specialized search engines (Wikipedia, Arxiv, Pubmed, etc.).
-
-## Credits
+# Credits
 Huge thanks to Han Xiao from jina.ai for his inspirational [blog post](https://jina.ai/news/a-practical-guide-to-implementing-deepsearch-deepresearch/) and [follow up](https://jina.ai/news/snippet-selection-and-url-ranking-in-deepsearch-deepresearch/)

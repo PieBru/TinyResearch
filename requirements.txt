@@ -4,9 +4,8 @@ duckduckgo-search
 requests
 beautifulsoup4 # For parsing HTML (imported as bs4)
 pytz # For timezone handling
-sentence-transformers # For generating text embeddings
 faiss-cpu # For the vector database (use faiss-gpu if you have a compatible GPU and CUDA setup)
-torch
 streamlit # Optional, for the Web UI
 rich # Optional, for pretty printing
 yfinance
+pytest

@@ -18,12 +18,8 @@ import argparse
 # Suppress the specific UserWarning from protobuf about gencode versions
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Protobuf gencode version.*older than the runtime version.*")
 
-try:
-    import torch
-    torch.set_num_threads(1) # Try setting to 1 to avoid potential threading issues
-except ImportError:
-    pass # If torch is not directly importable here, sentence_transformers will handle it
-
+# Torch is not a direct dependency for core logic anymore if sentence-transformers is removed.
+# FAISS or other libraries might still use it.
 try:
     from rich import print
 except ImportError:
@@ -51,13 +47,21 @@ except ImportError:
 DEFAULT_TOKEN_BUDGET = 30000
 DEFAULT_MAX_SIMULATION_STEPS = 20
 DEFAULT_TIME_BUDGET_MINUTES = 10 # New time budget constant
-DEFAULT_OUTPUT_FORMAT = "text"
 DEFAULT_MAX_URL_CONTENT_LENGTH = 2000
-DEFAULT_LLM_PROVIDER = "litellm"
-DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:11434"
-DEFAULT_LLM_MODEL = "ollama/qwen2.5"
+DEFAULT_OUTPUT_FORMAT = "text"
 
-EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2' # Good default for sentence embeddings
+DEFAULT_LLM_PROVIDER = "litellm" # See https://docs.litellm.ai/docs/providers
+
+# Ollama, see https://docs.litellm.ai/docs/providers/ollama
+# DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:11434"
+# DEFAULT_LLM_MODEL = "ollama/qwen2.5" # Also "ollama/qwen3" and others that are tools-enabled
+# DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/nomic-embed-text" # Default embedding model for LiteLLM
+
+# LM Studio, see https://docs.litellm.ai/docs/providers/lm_studio
+DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:1234"
+DEFAULT_LLM_MODEL = "lm_studio/qwen3-30b-a3b@q4_k_xl"
+DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/nomic-embed-text" # Default embedding model for LiteLLM
+
 VECTOR_DB_SEARCH_TOP_N = 3 # Number of similar items to retrieve from vector DB
 CHROME_WEB_BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.5615.49 Safari/537.36'
 DEFAULT_WEB_BROWSER_USER_AGENT = CHROME_WEB_BROWSER_USER_AGENT
@@ -84,21 +88,58 @@ g_llm_provider = DEFAULT_LLM_PROVIDER
 g_llm_provider_endpoint = DEFAULT_LLM_PROVIDER_ENDPOINT
 g_llm_model = DEFAULT_LLM_MODEL
 g_gemini_api_key = None
-g_embedding_model = None # Global for embedding model instance
 
 # --- Embedding and Vector DB Functions ---
-def _get_embedding_model():
-    global g_embedding_model
-    if g_embedding_model is None:
-        print(f"Loading sentence embedding model: {EMBEDDING_MODEL_NAME}...")
-        from sentence_transformers import SentenceTransformer # Import here
-        g_embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        print("Embedding model loaded.")
-    return g_embedding_model
+
+def _embed_texts_litellm(texts_to_embed, context):
+    """Helper function to get embeddings using LiteLLM."""
+    embedding_model_name = context["embedding_model_name"]
+    api_base_to_use = None
+
+    # LiteLLM typically auto-detects api_base for "ollama/" prefixes if Ollama runs on default.
+    # Explicitly set api_base if g_llm_provider_endpoint is provided and it's not a known cloud model,
+    # allowing for custom local servers or non-standard Ollama setups.
+    if g_llm_provider_endpoint and not any(embedding_model_name.startswith(p) for p in ["gemini/", "openai/", "azure/", "bedrock/"]):
+        api_base_to_use = g_llm_provider_endpoint
+
+    print(f"Requesting embeddings for {len(texts_to_embed)} text(s) using LiteLLM model: {embedding_model_name} (API base: {api_base_to_use or 'Default'})")
+    try:
+        response = litellm.embedding(
+            model=embedding_model_name,
+            input=texts_to_embed,
+            api_base=api_base_to_use
+        )
+        embeddings = [item.embedding for item in response.data]
+        
+        if hasattr(response, 'usage') and response.usage:
+            tokens_consumed = response.usage.total_tokens if hasattr(response.usage, 'total_tokens') else response.usage.prompt_tokens
+            if tokens_consumed:
+                context["tokens_used"] += tokens_consumed
+        else: # Fallback token estimation for embeddings
+            estimated_tokens = sum(len(text.split()) for text in texts_to_embed) # Rough estimate
+            context["tokens_used"] += estimated_tokens
+            print(f"LiteLLM embedding usage not available, estimated tokens: {estimated_tokens}")
+
+        return np.array(embeddings, dtype=np.float32)
+    except Exception as e:
+        print(f"Error during LiteLLM embedding call for model '{embedding_model_name}': {e}")
+        context["tokens_used"] += LLM_ERROR_PENALTY_TOKENS 
+        return None
+
+def _get_embedding_dimension(context):
+    """Determines embedding dimension by making a test call."""
+    if 'embedding_dim' not in context: # Calculate and store if not already done
+        print(f"Determining embedding dimension for model: {context['embedding_model_name']}...")
+        dummy_embeddings_array = _embed_texts_litellm(["get dimension test string"], context)
+        if dummy_embeddings_array is not None and dummy_embeddings_array.ndim == 2 and dummy_embeddings_array.shape[0] > 0:
+            context['embedding_dim'] = dummy_embeddings_array.shape[1]
+            print(f"Determined embedding dimension: {context['embedding_dim']}")
+        else:
+            raise ValueError(f"Could not determine embedding dimension using LiteLLM for model {context['embedding_model_name']}.")
+    return context['embedding_dim']
 
 def _initialize_vector_db(context):
-    model = _get_embedding_model()
-    embedding_dim = model.get_sentence_embedding_dimension()
+    embedding_dim = _get_embedding_dimension(context) # Get dimension using LiteLLM
     context['vector_db_index'] = faiss.IndexFlatL2(embedding_dim)
     context['vector_db_texts'] = [] # Stores original texts, index corresponds to FAISS ID
     print(f"In-memory FAISS vector DB initialized with dimension {embedding_dim}.")
@@ -107,42 +148,43 @@ def add_text_to_vector_db(context, text_content, source_info=""):
     if not text_content or not isinstance(text_content, str) or not text_content.strip():
         return
     if 'vector_db_index' not in context:
-        print("Vector DB not initialized. Skipping add.")
-        return
+        _initialize_vector_db(context) # Initialize if not already
+        # print("Vector DB not initialized. Skipping add.") # Should be initialized now
+        # return
         
-    model = _get_embedding_model()
-    # encode() with a list of one sentence returns a 2D array of shape (1, dim)
-    embeddings_array = model.encode([text_content.strip()]) 
+    embeddings_array = _embed_texts_litellm([text_content.strip()], context)
     
-    # Ensure it's a 2D numpy array of float32, even if encode returned something slightly different for an empty string (though it shouldn't)
     if embeddings_array is not None and embeddings_array.ndim == 2 and embeddings_array.shape[0] > 0:
-        embeddings_np = np.array(embeddings_array, dtype=np.float32)
-        context['vector_db_index'].add(embeddings_np)
-    context['vector_db_texts'].append({"text": text_content.strip(), "source": source_info})
-    # print(f"Added to Vector DB (ID {context['vector_db_index'].ntotal - 1}): {text_content[:100]}... (Source: {source_info})")
+        # embeddings_array is already np.float32 from _embed_texts_litellm
+        context['vector_db_index'].add(embeddings_array)
+        context['vector_db_texts'].append({"text": text_content.strip(), "source": source_info})
+        # print(f"Added to Vector DB (ID {context['vector_db_index'].ntotal - 1}): {text_content[:100]}... (Source: {source_info})")
+    else:
+        print(f"Failed to get embedding for text: {text_content[:100]}...")
 
 def query_vector_db(context, query_text, top_n=VECTOR_DB_SEARCH_TOP_N):
     if 'vector_db_index' not in context or context['vector_db_index'].ntotal == 0:
         print("Vector DB is empty or not initialized. No query performed.")
-        return ""
+        return "No items in vector DB to search." # Return the descriptive message here
     if not query_text or not isinstance(query_text, str) or not query_text.strip():
         print("Empty query text for vector DB. No query performed.")
         return ""
 
     print(f"Querying Vector DB with: '{query_text[:100]}...' (top_n={top_n})")
-    model = _get_embedding_model()
-    query_embedding = model.encode([query_text.strip()])
-    query_embedding_np = np.array(query_embedding, dtype=np.float32)
+    query_embedding_array = _embed_texts_litellm([query_text.strip()], context)
 
-    # Ensure top_n is not greater than the number of items in the index
+    if query_embedding_array is None or query_embedding_array.shape[0] == 0:
+        print(f"Failed to get embedding for query: {query_text[:100]}...")
+        return "Failed to generate query embedding."
+
     actual_top_n = min(top_n, context['vector_db_index'].ntotal)
-    if actual_top_n == 0: return ""
+    if actual_top_n == 0: return "No items in vector DB to search." # This case should ideally not be hit if ntotal > 0
 
-    distances, indices = context['vector_db_index'].search(query_embedding_np, actual_top_n)
+    distances, indices = context['vector_db_index'].search(query_embedding_array, actual_top_n)
     
     retrieved_texts = []
-    for i in indices[0]: # indices[0] because we search for a single query_embedding
-        if i != -1: # FAISS returns -1 for indices if fewer than k results are found
+    for i in indices[0]: 
+        if i != -1: 
             retrieved_texts.append(f"- Source: {context['vector_db_texts'][i]['source']}, Content: {context['vector_db_texts'][i]['text'][:150]}...")
     return "\n".join(retrieved_texts) if retrieved_texts else "No relevant information found in session memory."
 # --- LLM Interaction Functions (Replaces SmolAgent functionality) ---
@@ -437,7 +479,9 @@ def initialize_context_and_variables(args):
         "is_user_question_context": False, # Added comma here
         # Add new context keys for reasoning style from args
         "selected_reasoning_style": args.reasoning_style,
-        "reasoning_style_active": args.reasoning_style_active
+        "reasoning_style_active": args.reasoning_style_active,
+        "embedding_model_name": args.embedding_model_name, # Store embedding model name
+        # 'embedding_dim' will be populated by _initialize_vector_db -> _get_embedding_dimension
     }
     context["gaps_queue"].append({"text": args.user_question, "is_original": True})
     context["known_questions"].add(args.user_question)
@@ -1060,7 +1104,7 @@ Proposed General Search Query: "{action_data.get('query', '')}\""""
     if not final_result and context["simulation_step"] >= args.max_simulation_steps:
         print(f"\n--- Max simulation steps ({args.max_simulation_steps}) reached ---")
         final_result = generate_final_answer_with_agent(context, f"max steps ({args.max_simulation_steps}) reached", "SummarizerAgent")
-    
+
     if final_result: # Add the final answer to the vector DB
         add_text_to_vector_db(context, final_result, source_info="final_answer")
         
@@ -1071,6 +1115,11 @@ Proposed General Search Query: "{action_data.get('query', '')}\""""
     if final_result and context['simulation_step'] < args.max_simulation_steps:
         # If a solution was found and we didn't simply run out of max_steps
         steps_taken_for_display = context['simulation_step'] + 1
+
+    # If final_result is already set (e.g. from inside the loop), use it.
+    # Otherwise, if we hit max steps and generate_final_answer_with_agent didn't produce one, set a default.
+    if not final_result and context["simulation_step"] >= args.max_simulation_steps :
+        final_result = "Agent finished due to max steps, but no definitive answer was synthesized."
     
     total_time_taken_seconds = time.time() - context["start_time"]
 
@@ -1089,6 +1138,7 @@ Proposed General Search Query: "{action_data.get('query', '')}\""""
         "llm_provider": args.llm_provider,
         "llm_model": args.llm_model
     }
+    # Ensure final_result is returned from the function
 
     if args.output_format == "json":
         print(json.dumps(output_data, indent=2))
@@ -1120,6 +1170,7 @@ Proposed General Search Query: "{action_data.get('query', '')}\""""
         print(f"Bad Attempts: {output_data['bad_attempts']}")
         print(f"===================================")
 
+    return final_result # Explicitly return the final_result
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TinyResearch: An AI agent for answering complex questions by breaking them down, searching, and synthesizing information.")
@@ -1132,6 +1183,7 @@ if __name__ == "__main__":
     parser.add_argument("--llm_provider", type=str, choices=["gemini", "litellm"], default=DEFAULT_LLM_PROVIDER, help=f"LLM provider to use. (default: {DEFAULT_LLM_PROVIDER}, see https://docs.litellm.ai/docs/providers)")
     parser.add_argument("--llm_provider_endpoint", type=str, default=DEFAULT_LLM_PROVIDER_ENDPOINT, help=f"API endpoint for LLM provider (e.g., local Ollama). (default: {DEFAULT_LLM_PROVIDER_ENDPOINT})")
     parser.add_argument("--llm_model", type=str, default=DEFAULT_LLM_MODEL, help=f"Specific LLM model name. (default: {DEFAULT_LLM_MODEL})")
+    parser.add_argument("--embedding_model_name", type=str, default=DEFAULT_LITELLM_EMBEDDING_MODEL, help=f"Embedding model name for LiteLLM (e.g., ollama/nomic-embed-text, gemini/embedding-001). (default: {DEFAULT_LITELLM_EMBEDDING_MODEL})")
     parser.add_argument("--output_format", type=str, choices=["text", "json", "markdown"], default=DEFAULT_OUTPUT_FORMAT, help=f"Output format. (default: {DEFAULT_OUTPUT_FORMAT})")
     parser.add_argument("--reasoning_style", type=str, default="LLM Default", help="Selected reasoning style (e.g., Qwen3, DeepHermes3). Used by UI.")
     parser.add_argument("--reasoning_style_active", type=bool, default=False, help="Whether the selected reasoning style is active. Used by UI.")
