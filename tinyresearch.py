@@ -7,6 +7,7 @@
 
 __version__ = "0.2.1" 
 
+import sys
 import time
 import random
 import json
@@ -14,6 +15,7 @@ import re
 import warnings # Import the warnings module
 import os
 import argparse
+import sys # Import sys module
 
 # Suppress the specific UserWarning from protobuf about gencode versions
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Protobuf gencode version.*older than the runtime version.*")
@@ -29,7 +31,7 @@ except ImportError:
 try:
     import google.generativeai as genai
     import litellm
-    from duckduckgo_search import DDGS
+    litellm.set_verbose = True # Or litellm._turn_on_debug()
     import requests
     from bs4 import BeautifulSoup
     from datetime import datetime # For current time
@@ -53,14 +55,14 @@ DEFAULT_OUTPUT_FORMAT = "text"
 DEFAULT_LLM_PROVIDER = "litellm" # See https://docs.litellm.ai/docs/providers
 
 # Ollama, see https://docs.litellm.ai/docs/providers/ollama
-# DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:11434"
-# DEFAULT_LLM_MODEL = "ollama/qwen2.5" # Also "ollama/qwen3" and others that are tools-enabled
-# DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/nomic-embed-text" # Default embedding model for LiteLLM
+DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:11434"
+DEFAULT_LLM_MODEL = "ollama/qwen2.5" # Also "ollama/qwen3" and others that are tools-enabled
+DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/nomic-embed-text" # Default embedding model for LiteLLM
 
 # LM Studio, see https://docs.litellm.ai/docs/providers/lm_studio
-DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:1234"
-DEFAULT_LLM_MODEL = "lm_studio/qwen3-30b-a3b@q4_k_xl"
-DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/nomic-embed-text" # Default embedding model for LiteLLM
+# DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:1234/v1"
+# DEFAULT_LLM_MODEL = "lm_studio/qwen3-30b-a3b@q4_k_xl"
+# DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/nomic-embed-text" # Default embedding model for LiteLLM
 
 VECTOR_DB_SEARCH_TOP_N = 3 # Number of similar items to retrieve from vector DB
 CHROME_WEB_BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.5615.49 Safari/537.36'
@@ -187,6 +189,7 @@ def query_vector_db(context, query_text, top_n=VECTOR_DB_SEARCH_TOP_N):
         if i != -1: 
             retrieved_texts.append(f"- Source: {context['vector_db_texts'][i]['source']}, Content: {context['vector_db_texts'][i]['text'][:150]}...")
     return "\n".join(retrieved_texts) if retrieved_texts else "No relevant information found in session memory."
+
 # --- LLM Interaction Functions (Replaces SmolAgent functionality) ---
 def _make_llm_api_call(agent_name, system_prompt, full_user_prompt_text, 
                        llm_provider, llm_model, llm_provider_endpoint, 
@@ -243,13 +246,28 @@ def _make_llm_api_call(agent_name, system_prompt, full_user_prompt_text,
             if LLM_MIN_P > 0.0: # Only add if non-zero, as support varies
                 litellm_kwargs["min_p"] = LLM_MIN_P # Note: Not a standard LiteLLM param, model-dependent
 
+            model_to_send = llm_model
             if llm_model.startswith("ollama/") or (llm_provider_endpoint): # Check if endpoint is needed
                 litellm_kwargs["api_base"] = llm_provider_endpoint
-            
+                # If it's an LM Studio model (identified by "lm_studio/" prefix in our config)
+                # and we're providing an api_base, send the raw model name
+                # and tell LiteLLM to treat it as a generic OpenAI-compatible endpoint.
+                if llm_model.startswith("lm_studio/"):
+                    model_to_send = llm_model.split('/', 1)[1]
+                    # Prepend "openai/" to hint LiteLLM for OpenAI-compatible custom server
+                    model_to_send = f"openai/{model_to_send}"
+                    # OpenAI-compatible local servers often need a dummy api_key
+                    litellm_kwargs["api_key"] = "dummy_key_for_lm_studio" 
+
+            litellm_kwargs["model"] = model_to_send # Use the potentially modified model name
+
+            print(f"DEBUG: LiteLLM completion called by '{agent_name}' with kwargs:")
+            print(f"DEBUG: {litellm_kwargs}")
+            sys.stdout.flush() # Ensure it's flushed if redirected
             response = litellm.completion(**litellm_kwargs)
             raw_response_text = response.choices[0].message.content
             
-            if hasattr(response, 'usage') and response.usage and hasattr(response.usage, 'total_tokens'):
+            if hasattr(response, 'usage') and response.usage and hasattr(response.usage, 'total_tokens') and response.usage.total_tokens is not None:
                 tokens = response.usage.total_tokens
                 context_for_token_counting["tokens_used"] += tokens
             else: # Fallback token estimation

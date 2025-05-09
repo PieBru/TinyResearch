@@ -3,18 +3,18 @@
 # Install
 git clone https://github.com/PieBru/TinyResearch
 cd TinyResearch
-uv venv
 
 # Update
 git pull
-source .venv/bin/activate
+rm -rf .venv
+uv venv
+source .venv/bin/activate # Adjust for MacOS and Windows systems
 uv pip install -r requirements.txt -U
 
 # CLI
 python tinyresearch.py --help
 
 # Web UI
-python tests/download_model.py
 streamlit run tinyresearch_ui.py
 ```
 
