@@ -102,13 +102,40 @@ def update_llm_config_from_ui():
     # This callback is just to keep selected_style and style_active in sync
     # and to trigger a rerun so the UI (e.g. toggle's disabled state) updates.
 
+def auto_update_model_on_provider_change():
+    """Callback to auto-update model name when provider changes."""
+    # Read the provider directly from the widget that triggered the change
+    provider = st.session_state.get("llm_provider_selectbox_manual", st.session_state.llm_provider)
+    
+    if provider == "gemini":
+        st.session_state.llm_model = "gemini-2.0-flash" # As requested
+    elif provider == "litellm":
+        # If the current model looks like a Gemini model, switch it to the default litellm model.
+        # Otherwise, keep the user's potentially custom litellm model.
+        if st.session_state.llm_model is None or st.session_state.llm_model.startswith("gemini-") or st.session_state.llm_model.startswith("models/gemini-"):
+            st.session_state.llm_model = tinyresearch.DEFAULT_LLM_MODEL
+    
+    # Update the general llm_provider state as well
+    st.session_state.llm_provider = provider
+    # No need to explicitly rerun, Streamlit handles it with on_change
+
 with st.sidebar: # This line was causing the IndentationError due to the elif above it lacking a body
     st.subheader(APP_TITLE) # Added app title to the sidebar
     with st.expander("LLM Configuration", expanded=False):
-        st.session_state.llm_provider = st.selectbox("Provider", options=["gemini", "litellm"],
-                                     index=["gemini", "litellm"].index(st.session_state.llm_provider), key="llm_provider_selectbox_manual")
+        # The selectbox updates its own key, which the callback then reads.
+        # The general st.session_state.llm_provider is updated by the callback.
+        # The key "llm_provider_selectbox_manual" will hold the current selection of this widget.
+        selected_provider_for_ui = st.selectbox("Provider", options=["gemini", "litellm"],
+                                     index=["gemini", "litellm"].index(st.session_state.llm_provider), 
+                                     key="llm_provider_selectbox_manual",
+                                     on_change=auto_update_model_on_provider_change)
+        
+        # Determine if endpoint should be disabled based on the CURRENT selection of the provider selectbox
+        # The 'selected_provider_for_ui' variable holds the current value from the selectbox above.
+        endpoint_is_disabled_now = (selected_provider_for_ui == "gemini")
+
         st.session_state.llm_endpoint = st.text_input("Endpoint", value=st.session_state.llm_endpoint,
-                                      help="e.g., http://localhost:11434 for local Ollama", key="llm_endpoint_input_manual")
+                                      help="e.g., http://localhost:11434 for local Ollama. Disabled for Gemini.", key="llm_endpoint_input_manual", disabled=endpoint_is_disabled_now)
         st.session_state.llm_model = st.text_input("Model Name", value=st.session_state.llm_model,
                                    help="e.g., ollama/qwen2.5 or models/gemini-1.5-flash-latest", key="llm_model_input_manual")
         
