@@ -1,11 +1,13 @@
+# /run/media/piero/NVMe-4TB/Piero/Git/TinyResearch/requirements.txt
+streamlit
 google-generativeai
 litellm
-duckduckgo-search
 requests
-beautifulsoup4 # For parsing HTML (imported as bs4)
-pytz # For timezone handling
-faiss-cpu # For the vector database (use faiss-gpu if you have a compatible GPU and CUDA setup)
-streamlit # Optional, for the Web UI
-rich # Optional, for pretty printing
+beautifulsoup4
+pytz
 yfinance
-pytest
+faiss-cpu # or faiss-gpu if you have CUDA setup
+ollama
+numpy
+rich # Optional, but nice for CLI
+# Add any other direct dependencies

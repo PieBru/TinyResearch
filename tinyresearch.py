@@ -38,6 +38,7 @@ try:
     import pytz # For timezone handling
     import yfinance as yf # For stock data
     import faiss # For vector database
+    import ollama # Import the ollama library
     import numpy as np # For FAISS
 except ImportError:
     print("Missing required libraries. Please install them: pip install -r requirements.txt -U")
@@ -55,14 +56,14 @@ DEFAULT_OUTPUT_FORMAT = "text"
 DEFAULT_LLM_PROVIDER = "litellm" # See https://docs.litellm.ai/docs/providers
 
 # Ollama, see https://docs.litellm.ai/docs/providers/ollama
-DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:11434"
-DEFAULT_LLM_MODEL = "ollama/qwen2.5" # Also "ollama/qwen3" and others that are tools-enabled
-DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/nomic-embed-text" # Default embedding model for LiteLLM
+#DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:11434"
+#DEFAULT_LLM_MODEL = "ollama/qwen2.5" # Also "ollama/qwen3" and others that are tools-enabled
+#DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/bge-m3"
 
 # LM Studio, see https://docs.litellm.ai/docs/providers/lm_studio
-# DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:1234/v1"
-# DEFAULT_LLM_MODEL = "lm_studio/qwen3-30b-a3b@q4_k_xl"
-# DEFAULT_LITELLM_EMBEDDING_MODEL = "ollama/nomic-embed-text" # Default embedding model for LiteLLM
+DEFAULT_LLM_PROVIDER_ENDPOINT = "http://localhost:1234/v1"
+DEFAULT_LLM_MODEL = "lm_studio/qwen2.5-7b-instruct-1m"
+DEFAULT_LITELLM_EMBEDDING_MODEL = "lm_studio/text-embedding-bge-m3"
 
 VECTOR_DB_SEARCH_TOP_N = 3 # Number of similar items to retrieve from vector DB
 CHROME_WEB_BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.5615.49 Safari/537.36'
@@ -95,38 +96,69 @@ g_gemini_api_key = None
 
 def _embed_texts_litellm(texts_to_embed, context):
     """Helper function to get embeddings using LiteLLM."""
-    embedding_model_name = context["embedding_model_name"]
-    api_base_to_use = None
+    embedding_model_name_full = context["embedding_model_name"]
 
-    # LiteLLM typically auto-detects api_base for "ollama/" prefixes if Ollama runs on default.
-    # Explicitly set api_base if g_llm_provider_endpoint is provided and it's not a known cloud model,
-    # allowing for custom local servers or non-standard Ollama setups.
-    if g_llm_provider_endpoint and not any(embedding_model_name.startswith(p) for p in ["gemini/", "openai/", "azure/", "bedrock/"]):
-        api_base_to_use = g_llm_provider_endpoint
-
-    print(f"Requesting embeddings for {len(texts_to_embed)} text(s) using LiteLLM model: {embedding_model_name} (API base: {api_base_to_use or 'Default'})")
-    try:
-        response = litellm.embedding(
-            model=embedding_model_name,
-            input=texts_to_embed,
-            api_base=api_base_to_use
-        )
-        embeddings = [item.embedding for item in response.data]
-        
-        if hasattr(response, 'usage') and response.usage:
-            tokens_consumed = response.usage.total_tokens if hasattr(response.usage, 'total_tokens') else response.usage.prompt_tokens
-            if tokens_consumed:
-                context["tokens_used"] += tokens_consumed
-        else: # Fallback token estimation for embeddings
+    if embedding_model_name_full.startswith("ollama/"):
+        ollama_model_name = embedding_model_name_full.split('/', 1)[1]
+        # Use g_llm_provider_endpoint if set, otherwise default Ollama host
+        ollama_host = g_llm_provider_endpoint if g_llm_provider_endpoint and "ollama" in g_llm_provider_endpoint.lower() else "http://localhost:11434"
+        print(f"Requesting embeddings for {len(texts_to_embed)} text(s) using Ollama direct: model='{ollama_model_name}', host='{ollama_host}'")
+        try:
+            client = ollama.Client(host=ollama_host)
+            all_embeddings = []
+            for text_chunk in texts_to_embed: # Ollama library typically embeds one prompt at a time
+                response = client.embeddings(model=ollama_model_name, prompt=text_chunk)
+                all_embeddings.append(response["embedding"])
+            # Token counting for Ollama direct is not straightforward from its response.
+            # We can estimate based on input text.
             estimated_tokens = sum(len(text.split()) for text in texts_to_embed) # Rough estimate
             context["tokens_used"] += estimated_tokens
-            print(f"LiteLLM embedding usage not available, estimated tokens: {estimated_tokens}")
+            print(f"Ollama direct embedding estimated input tokens: {estimated_tokens}")
+            return np.array(all_embeddings, dtype=np.float32)
+        except Exception as e:
+            import traceback
+            print(f"ERROR during Ollama direct embedding call for model '{ollama_model_name}': {type(e).__name__} - {e}")
+            print(traceback.format_exc()) # Print full traceback for the direct ollama call error
+            context["tokens_used"] += LLM_ERROR_PENALTY_TOKENS
+            return None
+    else: # Use LiteLLM for other providers
+        api_base_to_use = None
+        api_key_to_use = None # Initialize api_key_to_use
 
-        return np.array(embeddings, dtype=np.float32)
-    except Exception as e:
-        print(f"Error during LiteLLM embedding call for model '{embedding_model_name}': {e}")
-        context["tokens_used"] += LLM_ERROR_PENALTY_TOKENS 
-        return None
+        if g_llm_provider_endpoint and not any(embedding_model_name_full.startswith(p) for p in ["gemini/", "openai/", "azure/", "bedrock/"]):
+            api_base_to_use = g_llm_provider_endpoint
+            # If this custom endpoint is for LM Studio (heuristic check), provide a dummy key
+            if "1234" in g_llm_provider_endpoint or "lmstudio" in g_llm_provider_endpoint.lower(): # Heuristic for LM Studio
+                api_key_to_use = "dummy_key_for_lm_studio_embeddings"
+
+        print(f"Requesting embeddings for {len(texts_to_embed)} text(s) using LiteLLM model: {embedding_model_name_full} (API base: {api_base_to_use or 'Default'})")
+        try:
+            response = litellm.embedding(
+                model=embedding_model_name_full,
+                input=texts_to_embed,
+                api_base=api_base_to_use,
+                api_key=api_key_to_use # Pass the api_key
+            )
+            # Adjust for different response structures.
+            if embedding_model_name_full.startswith("lm_studio/") and response.data and isinstance(response.data[0], dict) and "embedding" in response.data[0]:
+                embeddings = [item["embedding"] for item in response.data] # For raw LM Studio dict response
+            else:
+                embeddings = [item.embedding for item in response.data] # Standard LiteLLM EmbeddingResponse
+            
+            if hasattr(response, 'usage') and response.usage:
+                tokens_consumed = response.usage.total_tokens if hasattr(response.usage, 'total_tokens') else response.usage.prompt_tokens
+                if tokens_consumed:
+                    context["tokens_used"] += tokens_consumed
+            else: # Fallback token estimation for embeddings
+                estimated_tokens = sum(len(text.split()) for text in texts_to_embed) # Rough estimate
+                context["tokens_used"] += estimated_tokens
+                print(f"LiteLLM embedding usage not available, estimated tokens: {estimated_tokens}")
+
+            return np.array(embeddings, dtype=np.float32)
+        except Exception as e:
+            print(f"Error during LiteLLM embedding call for model '{embedding_model_name_full}': {e}")
+            context["tokens_used"] += LLM_ERROR_PENALTY_TOKENS 
+            return None
 
 def _get_embedding_dimension(context):
     """Determines embedding dimension by making a test call."""
@@ -191,19 +223,27 @@ def query_vector_db(context, query_text, top_n=VECTOR_DB_SEARCH_TOP_N):
     return "\n".join(retrieved_texts) if retrieved_texts else "No relevant information found in session memory."
 
 # --- LLM Interaction Functions (Replaces SmolAgent functionality) ---
-def _make_llm_api_call(agent_name, system_prompt, full_user_prompt_text, 
+def _make_llm_api_call(agent_name, messages, # Changed from system_prompt, full_user_prompt_text
                        llm_provider, llm_model, llm_provider_endpoint, 
                        max_output_tokens, context_for_token_counting):
     raw_response_text = ""
     print(f"Agent '{agent_name}' calling LLM ({llm_provider}/{llm_model})...")
+
+    # Extract system prompt and user prompt text for token estimation if needed, and for Gemini
+    system_prompt_for_estimation = messages[0]['content'] if messages and messages[0]['role'] == 'system' else ""
+    user_prompt_for_estimation = messages[-1]['content'] if messages and messages[-1]['role'] == 'user' else ""
 
     if llm_provider == "gemini":
         if not g_gemini_api_key:
             print("ERROR: Gemini API key not configured for 'gemini' provider.")
             return None, "Gemini API key not configured"
         try:
-            # For Gemini, system prompt is typically prepended to the user prompt
-            combined_prompt = f"{system_prompt}\n\n{full_user_prompt_text}"
+            # LiteLLM handles message conversion for Gemini, but if calling Gemini directly:
+            # Convert messages to Gemini's format (history + current prompt)
+            # For simplicity, we'll let LiteLLM handle this if it can, or adjust if direct Gemini SDK use is strict
+            # For now, assuming LiteLLM handles the messages list for Gemini provider.
+            # If not, this part needs specific Gemini history/prompt construction.
+            # Let's assume LiteLLM handles it for now. If it fails, we'll adjust.
             model_instance = genai.GenerativeModel(llm_model)
             gen_config_params = {
                 "max_output_tokens": max_output_tokens,
@@ -214,14 +254,16 @@ def _make_llm_api_call(agent_name, system_prompt, full_user_prompt_text,
                 gen_config_params["top_k"] = LLM_TOP_K
             # Note: Gemini API doesn't directly expose repeat_penalty or min_p in GenerationConfig
             response = model_instance.generate_content(
-                combined_prompt,
+                # Construct content from messages. For basic, use last user message.
+                # For multi-turn, Gemini SDK needs a list of Content objects.
+                [part for message in messages for part in genai.types.ContentDict(role=message['role'], parts=[message['content']]).parts], # More robust
                 generation_config=genai.types.GenerationConfig(**gen_config_params)
             )
             if response.usage_metadata:
                 tokens = response.usage_metadata.total_token_count
                 context_for_token_counting["tokens_used"] += tokens
             else: # Fallback token estimation
-                estimated_tokens = len(combined_prompt.split()) + len(response.text.split())
+                estimated_tokens = sum(len(m['content'].split()) for m in messages) + len(response.text.split())
                 context_for_token_counting["tokens_used"] += estimated_tokens
             raw_response_text = response.text
         except Exception as e:
@@ -233,7 +275,7 @@ def _make_llm_api_call(agent_name, system_prompt, full_user_prompt_text,
         try:
             litellm_kwargs = {
                 "model": llm_model,
-                "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": full_user_prompt_text}],
+                "messages": messages, # Use the passed messages list
                 "max_tokens": max_output_tokens,
                 "temperature": LLM_TEMPERATURE,
                 "top_p": LLM_TOP_P,
@@ -271,7 +313,7 @@ def _make_llm_api_call(agent_name, system_prompt, full_user_prompt_text,
                 tokens = response.usage.total_tokens
                 context_for_token_counting["tokens_used"] += tokens
             else: # Fallback token estimation
-                estimated_tokens = len(system_prompt.split()) + len(full_user_prompt_text.split()) + len(raw_response_text.split())
+                estimated_tokens = sum(len(m['content'].split()) for m in messages) + len(raw_response_text.split())
                 context_for_token_counting["tokens_used"] += estimated_tokens
         except Exception as e:
             print(f"Error during LiteLLM API call for agent '{agent_name}': {e}")
@@ -283,11 +325,18 @@ def _make_llm_api_call(agent_name, system_prompt, full_user_prompt_text,
     print(f"Agent '{agent_name}' raw LLM response:\n---\n{raw_response_text}\n---")
     return raw_response_text, None
 
-def decide_json_action(agent_name, system_prompt, user_prompt_text, 
+def decide_json_action(agent_name, messages, # Changed from system_prompt, user_prompt_text
                        llm_provider, llm_model, llm_provider_endpoint, 
                        max_output_tokens, context_for_token_counting):
+    # Construct messages list if system_prompt and user_prompt_text are passed for backward compatibility
+    # However, the goal is to pass messages directly.
+    # For this refactor, we assume `messages` is the primary input.
+    # If system_prompt and user_prompt_text were still separate, you'd do:
+    # messages_list = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt_text}]
+    print(">>>> RUNNING REFACTORED decide_json_action V2 <<<<") # Add a unique marker
+
     raw_response_text, error = _make_llm_api_call(
-        agent_name, system_prompt, user_prompt_text, 
+        agent_name, messages, # Pass messages list
         llm_provider, llm_model, llm_provider_endpoint, 
         max_output_tokens, context_for_token_counting
     )
@@ -322,11 +371,15 @@ def decide_json_action(agent_name, system_prompt, user_prompt_text,
         print(f"Problematic text: '{potential_json_string}'")
         return {"action_type": "error", "data": {"message": f"JSON/Validation Error: {e}", "raw_response": raw_response_text, "agent_name": agent_name}}
 
-def get_text_response(agent_name, system_prompt, user_prompt_text, 
+def get_text_response(agent_name, messages, # Changed from system_prompt, user_prompt_text
                       llm_provider, llm_model, llm_provider_endpoint, 
                       max_output_tokens, context_for_token_counting):
+    # Similar to decide_json_action, assume `messages` is the primary input.
+    # If system_prompt and user_prompt_text were still separate, you'd construct messages:
+    # messages_list = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt_text}]
+
     raw_response_text, error = _make_llm_api_call(
-        agent_name, system_prompt, user_prompt_text, 
+        agent_name, messages, # Pass messages list
         llm_provider, llm_model, llm_provider_endpoint, 
         max_output_tokens, context_for_token_counting
     )
@@ -401,6 +454,9 @@ Based on the user-provided context (original question, current task, knowledge, 
 Your response MUST be a valid JSON object with two keys: "action_type" and "data".
 
 Possible "action_type" values:
+
+**IMPORTANT: First, check the 'Dynamically Retrieved Context from Session Memory'. If it directly and sufficiently answers the 'Current Question/Task', you MUST use the 'answer' action_type and formulate your answer based on that retrieved context.**
+
 1. "answer": Provide an answer to the CURRENT question/task.
    - "data": {{"text": "Your answer...", "is_definitive": true_or_false, "has_references": true_or_false, "is_for_original": true_or_false}}
 2. "reflect": Break down the CURRENT question/task into simpler sub-questions.
@@ -450,7 +506,8 @@ Example of your EXACT output format:
 ANSWER_EVALUATOR_AGENT_SYSTEM_PROMPT = f"""You are an Answer Evaluator.
 Given an Original Question and a Proposed Answer, determine if the Proposed Answer is a good, definitive, and satisfactory response.
 Consider completeness, correctness, and whether it directly addresses all parts of the Original Question.
-IMPORTANT: If the Original Question asks for the current date/time, and the Proposed Answer provides a specific date/time, assume this date/time was just fetched by the system and should be considered "current" for the purpose of this evaluation, even if the year or date seems unusual to your general knowledge. Focus on whether the answer *format* and *content* match what would be expected from a current time query.
+IMPORTANT: If the Original Question asks for the current date/time (e.g., "What time is it?"), and the Proposed Answer provides a specific date/time string (e.g., "The current time is YYYY-MM-DD HH:MM:SS TZ"), this IS a good and direct answer. Assume the provided time is accurate as if just fetched by a tool.
+Similarly, if the question asks for a stock price and the answer provides it, assume it's good.
 
 Your response MUST be a JSON object with two top-level keys: "action_type" and "data".
 1.  The "action_type" key's value MUST be the string "answer_evaluation_result".
@@ -475,6 +532,10 @@ def strip_think_tags(text_content):
 
 # --- Context Initialization ---
 def initialize_context_and_variables(args):
+    # For shared DB from UI
+    shared_vector_db_index = getattr(args, 'shared_vector_db_index', None)
+    shared_vector_db_texts = getattr(args, 'shared_vector_db_texts', None)
+    shared_embedding_dim = getattr(args, 'shared_embedding_dim', None)
     print("Initializing context and variables...")
     context = {
         "token_budget": args.token_budget,
@@ -503,9 +564,21 @@ def initialize_context_and_variables(args):
     }
     context["gaps_queue"].append({"text": args.user_question, "is_original": True})
     context["known_questions"].add(args.user_question)
-    _initialize_vector_db(context) # Initialize vector DB
-    add_text_to_vector_db(context, args.user_question, source_info="original_user_question") # Add initial question
-    print(f"Context initialized. Original question: '{args.user_question}'")
+
+    if shared_vector_db_index is not None and shared_vector_db_texts is not None and shared_embedding_dim is not None:
+        print("Using shared vector DB from UI session.")
+        context['vector_db_index'] = shared_vector_db_index
+        context['vector_db_texts'] = shared_vector_db_texts
+        context['embedding_dim'] = shared_embedding_dim
+        # Add current user question to the shared DB if it's not already there (idempotency handled by known_questions for gaps)
+        # For simplicity, we assume the UI might have already added it or will.
+        # Or, we can add it here with a specific source.
+        add_text_to_vector_db(context, args.user_question, source_info="tinyresearcher_initial_user_question")
+    else:
+        print("Initializing new vector DB for this TinyResearcher run.")
+        _initialize_vector_db(context) # Initialize vector DB
+        add_text_to_vector_db(context, args.user_question, source_info="tinyresearcher_initial_user_question")
+    print(f"Context initialized for TinyResearcher. Original question: '{args.user_question}'")
     return context
 
 # --- Budget Check ---
@@ -553,8 +626,8 @@ Proposed Answer to Original Question: {answer_text}"""
     
     eval_response = decide_json_action(
         agent_name="AnswerEvaluatorAgent",
-        system_prompt=ANSWER_EVALUATOR_AGENT_SYSTEM_PROMPT,
-        user_prompt_text=eval_user_prompt,
+        # Construct messages for decide_json_action
+        messages=[{"role": "system", "content": ANSWER_EVALUATOR_AGENT_SYSTEM_PROMPT}, {"role": "user", "content": eval_user_prompt}],
         llm_provider=g_llm_provider,
         llm_model=g_llm_model, # Could use a faster/cheaper model
         llm_provider_endpoint=g_llm_provider_endpoint,
@@ -803,13 +876,25 @@ def enter_beast_mode(context, summarizer_agent):
 def generate_final_answer_with_agent(context, reason, summarizer_agent):
     print(f"Generating final answer with agent ({reason})...")
 
-    if context["knowledge_base"]:
-        question_lower = context["user_question"].lower()
+    knowledge_source_for_summary = []
+    source_type_for_prompt = "internal knowledge_base"
 
-        # Priority 1: Check for relevant 'current_datetime' knowledge
+    # Prioritize Tiny Researcher's own gathered knowledge if it exists
+    # and if the reason for summarizing isn't just an empty gaps queue without internal work.
+    if context["knowledge_base"] and reason != "gaps queue empty, synthesizing from knowledge":
+        knowledge_source_for_summary = context["knowledge_base"][-10:] # Last 10 items
+    elif context.get("vector_db_texts"): # Fallback to shared session memory
+        print("Attempting to use shared vector_db_texts for final summary.")
+        knowledge_source_for_summary = context["vector_db_texts"][-10:] # Last 10 items from shared DB
+        source_type_for_prompt = "shared session memory (vector_db_texts)"
+
+    # Check for direct answers from structured data (datetime, stock)
+    # This check should ideally use the chosen knowledge_source_for_summary
+    if knowledge_source_for_summary: # Check if we have any source to look into
+        question_lower = context["user_question"].lower()
         if "time" in question_lower or "date" in question_lower:
             datetime_knowledge = None
-            for item in reversed(context["knowledge_base"]):
+            for item in reversed(knowledge_source_for_summary): # Check the chosen source
                 if item.get("type") == "current_datetime":
                     query_tz_str = item.get('query_timezone', item.get('timezone', ''))
                     city_from_tz = query_tz_str.split('/')[-1].lower().replace('_', ' ') if '/' in query_tz_str else ""
@@ -821,12 +906,11 @@ def generate_final_answer_with_agent(context, reason, summarizer_agent):
                 print(f"Prioritizing direct datetime knowledge as final answer: {direct_answer}")
                 return direct_answer
 
-        # Priority 2: Check for relevant 'stock_data' knowledge
         stock_keywords = ["stock", "price", "market", "shares", "ticker"] # Add more if needed
         is_stock_query = any(keyword in question_lower for keyword in stock_keywords)
         if is_stock_query:
             stock_data_knowledge = None
-            for item in reversed(context["knowledge_base"]):
+            for item in reversed(knowledge_source_for_summary): # Check the chosen source
                 if item.get("type") == "stock_data":
                     ticker_in_knowledge = item.get("ticker", "").lower()
                     # If question mentions the ticker, or if it's the only stock data we have
@@ -839,30 +923,33 @@ def generate_final_answer_with_agent(context, reason, summarizer_agent):
                 print(f"Prioritizing direct stock_data knowledge as final answer: {direct_answer}")
                 return direct_answer
 
-    if context["knowledge_base"]:
+    if knowledge_source_for_summary: # If we have any knowledge (internal or shared)
         # Prepare user prompt for summarizer agent
         knowledge_summary_for_prompt = "\n".join([
-            f"- Type: {item.get('type', 'info')}, Content: {str(item.get('snippet', item.get('content', item.get('answer', 'N/A'))))[:150]}..."
-            for item in context["knowledge_base"][-10:] # Last 10 items for summary context
+            # Adjust formatting based on typical keys in knowledge_base vs vector_db_texts
+            f"- Source: {item.get('source', item.get('type', 'info'))}, Content: {str(item.get('text', item.get('snippet', item.get('content', item.get('answer', 'N/A')))))[:150]}..."
+            for item in knowledge_source_for_summary # Use the selected source
         ])
         
         summary_user_prompt = f"""Original Question: {context['user_question']}
-You have reached a limit (Reason: {reason}). 
-Based on all the knowledge gathered so far, provide the best possible final answer to the original question.
+Reason for this summary: {reason}.
+
+You are tasked with providing the best possible final answer to the 'Original Question' based *only* on the 'Available Information Snippets' provided below. These snippets are from {source_type_for_prompt}.
+
+**If the 'Original Question' is a direct recall question (e.g., "What is my name?", "What was the previous topic?") and a snippet directly answers it, provide that answer directly.**
+Otherwise, synthesize a comprehensive answer.
+
 If possible, include references or sources for the information.
 The most crucial pieces of information are likely the most recently gathered ones.
 
-Available Knowledge Snippets (most recent 10):
+Available Information Snippets (most recent up to 10 from {source_type_for_prompt}):
 {knowledge_summary_for_prompt}
-
-Please provide a comprehensive final answer based *primarily* on the provided knowledge snippets. Do not state that you cannot access real-time data if the snippets provide the necessary information.
 """
         # The line below was causing the AttributeError and is now removed.
         # final_answer_text = summarizer_agent.get_text_response(summary_user_prompt, context) 
         final_answer_text = get_text_response(
-            agent_name=summarizer_agent, # Use the passed string parameter
-            system_prompt=SUMMARIZER_AGENT_SYSTEM_PROMPT,
-            user_prompt_text=summary_user_prompt,
+            agent_name=summarizer_agent,
+            messages=[{"role": "system", "content": SUMMARIZER_AGENT_SYSTEM_PROMPT}, {"role": "user", "content": summary_user_prompt}],
             llm_provider=g_llm_provider,
             llm_model=g_llm_model,
             llm_provider_endpoint=g_llm_provider_endpoint,
@@ -872,8 +959,7 @@ Please provide a comprehensive final answer based *primarily* on the provided kn
         # The raw response is already printed by _make_llm_api_call, get_text_response handles stripping
         return final_answer_text
     else:
-        # Even if no knowledge, the question itself was a piece of data.
-        final_answer_text = f"Final answer for '{context['user_question']}'. Reason: {reason}. No significant knowledge gathered to synthesize an answer."
+        final_answer_text = f"Final answer for '{context['user_question']}'. Reason: {reason}. No significant knowledge gathered (neither in internal knowledge_base nor shared session memory) to synthesize an answer."
         print(f"\nFinal Answer: {final_answer_text}")
         return final_answer_text
 
@@ -927,6 +1013,8 @@ def run_deep_search_agent(args):
         
         # Prepare user prompt parts for the main decision agent
         retrieved_context_from_vector_db_str = query_vector_db(context, context["current_question"]) # Query Vector DB
+        # Ensure this print goes to the UI log via redirect_stdout
+        print(f"DEBUG_TR_CONTEXT: Retrieved for '{context['current_question']}':\n---\n{retrieved_context_from_vector_db_str}\n---")
         knowledge_snippets_str = _format_knowledge_snippets_for_prompt(context["knowledge_base"])
         urls_to_visit_str = ", ".join(context["urls_to_visit"][:MAX_URLS_TO_VISIT_IN_PROMPT]) if context["urls_to_visit"] else "None"
         bad_attempts_for_current_q_list = [f"- Attempt: {attempt['attempt_data']}" for attempt in context.get("bad_attempts", []) if attempt.get("question") == context["current_question"]]
@@ -956,8 +1044,8 @@ def run_deep_search_agent(args):
 
         model_response = decide_json_action(
             agent_name="MainDecisionAgent",
-            system_prompt=current_main_system_prompt,
-            user_prompt_text=main_decision_user_prompt_text,
+            # Construct messages list for the MainDecisionAgent
+            messages=[{"role": "system", "content": current_main_system_prompt}, {"role": "user", "content": main_decision_user_prompt_text}],
             llm_provider=args.llm_provider,
             llm_model=args.llm_model,
             llm_provider_endpoint=args.llm_provider_endpoint,
@@ -1019,8 +1107,8 @@ Proposed General Search Query: "{action_data.get('query', '')}\""""
                 print("Determining search strategy with SearchStrategyAgent...")
                 strategy_agent_response = decide_json_action(
                     agent_name="SearchStrategyAgent",
-                    system_prompt=SEARCH_STRATEGY_AGENT_SYSTEM_PROMPT,
-                    user_prompt_text=search_strategy_user_prompt,
+                    # Construct messages for decide_json_action
+                    messages=[{"role": "system", "content": SEARCH_STRATEGY_AGENT_SYSTEM_PROMPT}, {"role": "user", "content": search_strategy_user_prompt}],
                     llm_provider=args.llm_provider,
                     llm_model=args.llm_model, # Could use a faster/cheaper model
                     llm_provider_endpoint=args.llm_provider_endpoint,
