@@ -1,7 +1,7 @@
 {
-  "llm_provider": "gemini",
+  "llm_provider": "litellm",
   "llm_endpoint": "http://localhost:11434",
-  "llm_model": "gemini-2.0-flash",
+  "llm_model": "ollama/qwen2.5",
   "llm_temperature": 0.1,
   "llm_top_p": 0.1,
   "llm_top_k": 40,
