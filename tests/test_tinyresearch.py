@@ -652,5 +652,69 @@ class TestRunDeepSearchAgentLogic(unittest.TestCase):
         mock_store_bad_attempt.assert_called_once()
         mock_fallback.assert_called_once()
 
+    @patch('tinyresearch.query_vector_db')
+    def test_run_deep_search_agent_recall_name_from_vector_db(self, mock_query_vector_db):
+        """
+        Tests if the agent can recall the user's name when it's available in the vector DB
+        and the AnswerEvaluatorAgent correctly evaluates the answer.
+        """
+        self.mock_args.user_question = "What is my name?"
+        self.mock_args.max_simulation_steps = 2 # Allow a couple of steps
+
+        # Simulate that "My name is Piero" is found in the vector DB when queried
+        mock_query_vector_db.return_value = "- Source: direct_user_query, Content: my name is Piero..."
+
+        # Adjust context and mocks for this specific test case
+        self.initial_context["user_question"] = "What is my name?"
+
+        def mock_get_question_side_effect(context_arg):
+            context_arg["current_question"] = "What is my name?"
+            context_arg["is_user_question_context"] = True
+            return {"text": "What is my name?", "is_original": True}
+
+        self.mock_get_question.side_effect = mock_get_question_side_effect
+
+        # Mock the behavior of decide_json_action for different agents
+        def mock_decide_action_side_effect(*args_call, **kwargs_call):
+            agent_name = kwargs_call.get('agent_name')
+            messages = kwargs_call.get('messages')
+            user_prompt_content = ""
+            if messages and len(messages) > 1 and messages[1]['role'] == 'user':
+                user_prompt_content = messages[1]['content']
+
+            if agent_name == "MainDecisionAgent":
+                # Check if it's the "what is my name" scenario and the context is retrieved
+                if "Current Question/Task: What is my name?" in user_prompt_content and \
+                   "my name is Piero" in user_prompt_content: # Check for retrieved context
+                    return {"action_type": "answer", "data": {"text": "Your name is Piero.", "is_definitive": True, "is_for_original": True, "has_references": False}}
+                else: # Fallback for MainDecisionAgent if it's called unexpectedly otherwise
+                    print(f"WARN: MainDecisionAgent called with unexpected prompt in test: {user_prompt_content[:200]}")
+                    return {"action_type": "reflect", "data": {"sub_questions": ["Fallback question?"]}}
+
+            elif agent_name == "AnswerEvaluatorAgent":
+                if "Original Question: What is my name?" in user_prompt_content and \
+                   "Proposed Answer to Original Question: Your name is Piero." in user_prompt_content:
+                    return {"action_type": "answer_evaluation_result", "data": {"is_good_answer": True, "reason": "Test: Correctly recalled name."}}
+                else:
+                    print(f"WARN: AnswerEvaluatorAgent called with unexpected prompt in test: {user_prompt_content[:200]}")
+                    return {"action_type": "answer_evaluation_result", "data": {"is_good_answer": False, "reason": "Test: Fallback bad answer."}}
+            
+            # Fallback for any other agent calls
+            print(f"WARN: Unhandled mock_decide_action_side_effect call for agent: {agent_name}")
+            return {"action_type": "error", "data": {"message": "Unhandled mock scenario in test_recall_name", "agent_name": agent_name}}
+
+        self.mock_decide_action.side_effect = mock_decide_action_side_effect
+
+        # Ensure embedding calls for initialize_context and the one query_vector_db in the loop are covered
+        # 1. _get_embedding_dimension (in initialize_context)
+        # 2. add_text_to_vector_db for initial question (in initialize_context)
+        # 3. add_text_to_vector_db for final answer.
+        # The setUp's side_effect for self.mock_ollama_client_instance.embeddings provides 3 responses, which is correct.
+
+        final_answer = tinyresearch.run_deep_search_agent(self.mock_args)
+
+        self.assertEqual(final_answer, "Your name is Piero.")
+        mock_query_vector_db.assert_called_with(self.initial_context, "What is my name?") # Check the query
+
 if __name__ == '__main__':
     unittest.main()

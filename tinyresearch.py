@@ -508,6 +508,9 @@ Example of your EXACT output format:
 ANSWER_EVALUATOR_AGENT_SYSTEM_PROMPT = f"""You are an Answer Evaluator.
 Given an Original Question and a Proposed Answer, determine if the Proposed Answer is a good, definitive, and satisfactory response.
 Consider completeness, correctness, and whether it directly addresses all parts of the Original Question.
+
+Here are some guidelines:
+- If the Original Question is a direct recall question (e.g., "What is my name?", "What was the previous topic I mentioned?") and the Proposed Answer directly provides the recalled information (e.g., "Your name is Piero.", "You previously mentioned X."), this IS a good and direct answer.
 IMPORTANT: If the Original Question asks for the current date/time (e.g., "What time is it?"), and the Proposed Answer provides a specific date/time string (e.g., "The current time is YYYY-MM-DD HH:MM:SS TZ"), this IS a good and direct answer. Assume the provided time is accurate as if just fetched by a tool.
 Similarly, if the question asks for a stock price and the answer provides it, assume it's good.
 
@@ -994,6 +997,9 @@ def run_deep_search_agent(args):
     # Max output tokens are passed as arguments (LLM_MAX_OUTPUT_TOKENS or LLM_SUMMARIZER_MAX_OUTPUT_TOKENS).
 
     final_result = None
+    # Initialize a flag for successful handling before the action dispatch, reset each loop
+    current_question_successfully_handled_this_step = False
+
     while context["simulation_step"] < args.max_simulation_steps:
         print(f"\n--- Loop Iteration: {context['simulation_step'] + 1} ---")
         print(f"Tokens used so far: {context['tokens_used']}/{context['token_budget']}")
@@ -1001,6 +1007,9 @@ def run_deep_search_agent(args):
         if check_token_budget_exceeded(context) or check_time_budget_exceeded(context):
             final_result = enter_beast_mode(context, "SummarizerAgent") # Pass agent name for logging
             break 
+
+        # Reset for the current iteration
+        current_question_successfully_handled_this_step = False
 
         # Get the current question item to process
         current_question_item = get_current_question_from_gaps(context)
@@ -1070,11 +1079,12 @@ def run_deep_search_agent(args):
         if action_type == "answer":
             if is_answer_for_original_question(context, action_data):
                 evaluation_is_good = evaluate_answer_with_agent(context, action_data.get("text", ""), "AnswerEvaluatorAgent")
-                if evaluation_is_good: # If the AnswerEvaluatorAgent agrees it's a good answer
+                if evaluation_is_good: 
+                    current_question_successfully_handled_this_step = True # Mark as handled
                     if action_data.get("is_definitive"): # And if the MainDecisionAgent also marked it as definitive
                         final_result = action_data["text"] 
                         print(f"Definitive answer found for original question (Main Agent: Definitive, Evaluator: Good).")
-                        break 
+                        # Break will be handled by the check after re-queue logic
                     else:
                         #print("Answer is definitive for original question but lacks references.")
                         # Good answer for original question, but MainDecisionAgent didn't mark it definitive.
@@ -1083,19 +1093,23 @@ def run_deep_search_agent(args):
                 else: # evaluation_is_good is False
                     print("Answer for original question evaluated as not good.")
                     store_bad_attempt_reset_context(context)
+                    # current_question_successfully_handled_this_step remains False
             else: # Not for original question (i.e., for a sub-question)
                 print("Answer is for a sub-question. Storing as intermediate knowledge.")
                 store_as_intermediate_knowledge(context, action_data)
+                current_question_successfully_handled_this_step = True # Mark as handled
        
         elif action_type == "reflect":
             if context["disable_reflect_next"]:
                 print("Reflect chosen, but it's disabled. Storing as bad attempt.")
                 store_bad_attempt_reset_context(context)
+                # current_question_successfully_handled_this_step remains False
             else:
                 sub_questions = process_new_sub_questions(context, action_data)
                 unique_new_q = new_unique_questions_check(context, sub_questions)
                 if unique_new_q: add_to_gaps_queue(context, unique_new_q)
                 else: disable_reflect_for_next_step(context)
+                current_question_successfully_handled_this_step = True # Mark as handled
         
         elif action_type == "search":
             if context["disable_search_next"]:
@@ -1183,25 +1197,18 @@ Proposed General Search Query: "{action_data.get('query', '')}\""""
             print(f"Unknown or unhandled action type: {action_type}. Storing as bad attempt.")
             store_bad_attempt_reset_context(context)
 
-        # --- Re-queue current question if not fully handled ---
-        # If a final result was achieved this step, the loop will break.
-        if final_result:
-            break # Exit loop if definitive answer for original question was found
-        
-        # If an answer was generated (even intermediate), add it to vector DB if not already done by store_as_intermediate_knowledge
-        # This is a bit redundant if store_as_intermediate_knowledge already did it.
+        # --- Re-queue current question if not successfully handled ---
+        if final_result: # If a definitive answer for the original question was found and accepted
+            break
 
-        # Determine if the current question was "handled" by an answer or reflect action
-        current_question_was_answered_or_reflected = False
-        if action_type == "answer": # Any answer (intermediate or for original but not final)
-            current_question_was_answered_or_reflected = True
-        elif action_type == "reflect": # Reflection breaks down the current question
-            current_question_was_answered_or_reflected = True
-        
-        if not current_question_was_answered_or_reflected and action_type != "error": # Don't re-queue on agent error for the same question immediately
-            print(f"Re-queuing current question '{current_question_item['text']}' as it was not answered or reflected upon in this step.")
+        # Actions like search, visit, get_datetime, get_stock_price, or agent errors,
+        # or an answer for the original question that was evaluated as "not good"
+        # mean the question itself wasn't "successfully handled" by providing a satisfactory answer or breaking it down.
+        if not current_question_successfully_handled_this_step:
+            print(f"Re-queuing current question '{current_question_item['text']}' as it was not successfully handled or progressed this step.")
             context["gaps_queue"].insert(0, current_question_item)
-        # --- End Re-queue logic ---
+        else:
+            print(f"Current question '{current_question_item['text']}' considered successfully handled or progressed for this step. Not re-queuing immediately.")
 
         context["simulation_step"] += 1
         context["disable_reflect_next"] = False
