@@ -1,0 +1,17 @@
+{
+  "llm_provider": "gemini",
+  "llm_endpoint": "http://localhost:11434",
+  "llm_model": "gemini-2.0-flash",
+  "llm_temperature": 0.1,
+  "llm_top_p": 0.1,
+  "llm_top_k": 40,
+  "llm_repeat_penalty": 1.0,
+  "llm_min_p": 0.0,
+  "selected_style_selectbox": "LLM Default",
+  "style_active_toggle": false,
+  "time_budget": 10,
+  "token_budget": 30000,
+  "max_steps": 20,
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.5615.49 Safari/537.36",
+  "max_url_len": 2000
+}
