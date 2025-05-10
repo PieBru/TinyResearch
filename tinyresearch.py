@@ -261,9 +261,9 @@ def _make_llm_api_call(agent_name, system_prompt, full_user_prompt_text,
 
             litellm_kwargs["model"] = model_to_send # Use the potentially modified model name
 
-            print(f"DEBUG: LiteLLM completion called by '{agent_name}' with kwargs:")
-            print(f"DEBUG: {litellm_kwargs}")
-            sys.stdout.flush() # Ensure it's flushed if redirected
+            # print(f"DEBUG: LiteLLM completion called by '{agent_name}' with kwargs:")
+            # print(f"DEBUG: {litellm_kwargs}")
+            # sys.stdout.flush() # Ensure it's flushed if redirected
             response = litellm.completion(**litellm_kwargs)
             raw_response_text = response.choices[0].message.content
             

@@ -355,12 +355,12 @@ def run_direct_llm_interaction():
     tinyresearch.LLM_MIN_P = st.session_state.llm_min_p
 
     # --- CLI DEBUG PRINTS ---
-    print(f"UI_DEBUG: Preparing to call tinyresearch.get_text_response from run_direct_llm_interaction")
-    print(f"UI_DEBUG: agent_name='DirectLLMUI'")
-    print(f"UI_DEBUG: system_prompt='{system_prompt_to_use}'") # Be mindful if this is very long
-    print(f"UI_DEBUG: llm_provider='{current_llm_provider}'")
-    print(f"UI_DEBUG: llm_model='{current_llm_model}'")
-    print(f"UI_DEBUG: llm_provider_endpoint='{current_llm_endpoint}'") # THIS IS KEY
+    # print(f"UI_DEBUG: Preparing to call tinyresearch.get_text_response from run_direct_llm_interaction")
+    # print(f"UI_DEBUG: agent_name='DirectLLMUI'")
+    # print(f"UI_DEBUG: system_prompt='{system_prompt_to_use}'") # Be mindful if this is very long
+    # print(f"UI_DEBUG: llm_provider='{current_llm_provider}'")
+    # print(f"UI_DEBUG: llm_model='{current_llm_model}'")
+    # print(f"UI_DEBUG: llm_provider_endpoint='{current_llm_endpoint}'") # THIS IS KEY
     # --- END CLI DEBUG PRINTS ---
 
     log_capture = io.StringIO()
