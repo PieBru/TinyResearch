@@ -5,17 +5,18 @@
 # - https://jina.ai/news/a-practical-guide-to-implementing-deepsearch-deepresearch/
 # - https://jina.ai/news/snippet-selection-and-url-ranking-in-deepsearch-deepresearch/
 
-__version__ = "0.2.1" 
+# Versioning scheme: YYYY.MM.DD.progressive_letter (e.g., 2024.05.10.a)
+__version__ = "2024.05.10.c"
 
 import sys
 import time
 import random
 import json
 import re
-import warnings # Import the warnings module
+import warnings
 import os
 import argparse
-import sys # Import sys module
+import sys
 
 # Suppress the specific UserWarning from protobuf about gencode versions
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Protobuf gencode version.*older than the runtime version.*")
@@ -31,7 +32,8 @@ except ImportError:
 try:
     import google.generativeai as genai
     import litellm
-    litellm.set_verbose = True # Or litellm._turn_on_debug()
+    # os.environ['LITELLM_LOG'] = 'DEBUG'
+    from duckduckgo_search import DDGS # Import DDGS here
     import requests
     from bs4 import BeautifulSoup
     from datetime import datetime # For current time

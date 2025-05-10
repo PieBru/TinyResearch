@@ -21,12 +21,15 @@ except ImportError as e:
     st.error(f"Failed to import tinyresearch.py. Ensure it's in the same directory or Python path. Error: {e}")
     st.stop()
 
+# Versioning scheme: YYYY.MM.DD.progressive_letter (e.g., 2024.05.10.a)
+__version__ = "2024.05.10.c"
+
 # --- LiteLLM Debugging ---
-litellm.set_verbose = True # Enable verbose logging for debugging
+# os.environ['LITELLM_LOG'] = 'DEBUG' # Enable verbose logging for debugging
 
 # --- App Configuration ---
 APP_TITLE = "TinyResearch UI"
-APP_VERSION = tinyresearch.__version__ if hasattr(tinyresearch, '__version__') else "0.1.0"
+APP_VERSION = __version__ # Use the UI's own version string
 GITHUB_LINK = "https://github.com/PieBru/TinyResearch" # Please verify/update this link
 APP_DESCRIPTION = "An AI agent for answering complex questions by breaking them down, searching, and synthesizing information."
 SETTINGS_FILE = "tinyresearch_ui_settings.json"
